@@ -1,6 +1,7 @@
 import ts from 'typescript'
 
 export interface Declaration {
+  name: string
   path: string
   line: number
   kind: string
@@ -36,7 +37,7 @@ function declarationName(node: ts.Node): ts.Identifier | undefined {
   return undefined
 }
 
-export function extractDeclarations(path: string, source: string, name: string, limit: number): Declaration[] {
+export function extractDeclarations(path: string, source: string, names: ReadonlySet<string>, limit: number): Declaration[] {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
   const lines = source.split(/\r?\n/)
   const found: Declaration[] = []
@@ -45,9 +46,10 @@ export function extractDeclarations(path: string, source: string, name: string, 
     if (found.length >= limit) return
     const identifier = declarationName(node)
     const kind = declarationKind(node)
-    if (identifier?.text === name && kind !== undefined) {
+    if (identifier !== undefined && names.has(identifier.text) && kind !== undefined) {
       const line = file.getLineAndCharacterOfPosition(identifier.getStart(file)).line + 1
       found.push({
+        name: identifier.text,
         path,
         line,
         kind,

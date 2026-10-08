@@ -1,9 +1,10 @@
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { extractDeclarations } from './declarations.js'
 import type { Declaration } from './declarations.js'
 
 const MAX_FILES = 20
+const MAX_NAMES = 8
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_RESULTS = 30
 const SUPPORTED_FILE = /\.(?:ts|tsx|js|jsx)$/i
@@ -15,10 +16,16 @@ export interface SearchResult {
   truncated: boolean
 }
 
-function validateName(name: string): void {
-  if (name.length === 0 || name.length > 128) throw new Error('name must contain 1–128 characters')
-  const found = extractDeclarations('query.ts', `let ${name} = 1`, name, 1)
-  if (found.length !== 1) throw new Error('name must be one valid TS/JS identifier')
+function validateNames(names: string[]): ReadonlySet<string> {
+  if (names.length < 1 || names.length > MAX_NAMES) throw new Error(`names must contain 1–${MAX_NAMES} identifiers`)
+  const unique = new Set<string>()
+  for (const name of names) {
+    if (name.length === 0 || name.length > 128) throw new Error('each name must contain 1–128 characters')
+    const found = extractDeclarations('query.ts', `let ${name} = 1`, new Set([name]), 1)
+    if (found.length !== 1) throw new Error(`name must be one valid TS/JS identifier: ${name}`)
+    unique.add(name)
+  }
+  return unique
 }
 
 function validateFiles(files: string[]): string[] {
@@ -34,18 +41,49 @@ function validateFiles(files: string[]): string[] {
   return [...unique]
 }
 
+async function discoverFiles(tools: ToolRuntime, names: ReadonlySet<string>, exec: ToolExecution): Promise<string[]> {
+  if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable; provide candidate files')
+  const pattern = [...names].map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const outcome = await tools.execute({
+    callId: `${exec.callId}:grep` as typeof exec.callId,
+    rootCallId: exec.rootCallId,
+    parent: exec.token,
+    agent: exec.agent,
+    signal: exec.signal,
+    name: 'grep',
+    arguments: { pattern, include: '*.{ts,tsx,js,jsx}' },
+  })
+  if (outcome.isError) throw new Error(`host grep failed: ${outcome.error.message}; provide candidate files`)
+  const value: unknown = outcome.value
+  if (typeof value !== 'object' || value === null || !('matches' in value) || !Array.isArray(value.matches)) {
+    throw new Error('host grep returned no structured matches')
+  }
+  const paths = new Set<string>()
+  for (const match of value.matches) {
+    if (typeof match !== 'object' || match === null || !('path' in match) || typeof match.path !== 'string') {
+      throw new Error('host grep returned an invalid candidate path')
+    }
+    paths.add(match.path)
+    if (paths.size > MAX_FILES) throw new Error(`host grep found more than ${MAX_FILES} candidate files; provide a narrower files list`)
+  }
+  return [...paths]
+}
+
 export async function findDeclarations(
   fs: FileSystem,
-  args: { name: string; files: string[] },
+  tools: ToolRuntime,
+  args: { names: string[]; files?: string[] },
   exec: ToolExecution,
 ): Promise<SearchResult> {
-  validateName(args.name)
-  const paths = validateFiles(args.files)
+  const names = validateNames(args.names)
   const cwd = exec.agent?.session.header.cwd
   if (!cwd) throw new Error('A Harness Session workspace is required')
   exec.signal.throwIfAborted()
-  const root = await fs.resolve('.', { cwd, signal: exec.signal })
+  const candidates = args.files === undefined ? await discoverFiles(tools, names, exec) : args.files
   const result: SearchResult = { filesScanned: 0, declarations: [], skipped: [], truncated: false }
+  if (candidates.length === 0 && args.files === undefined) return result
+  const paths = validateFiles(candidates)
+  const root = await fs.resolve('.', { cwd, signal: exec.signal })
   for (const path of paths) {
     exec.signal.throwIfAborted()
     const target = await fs.resolve(path, { cwd, signal: exec.signal })
@@ -70,7 +108,7 @@ export async function findDeclarations(
       continue
     }
     result.filesScanned++
-    const declarations = extractDeclarations(path, source, args.name, MAX_RESULTS + 1 - result.declarations.length)
+    const declarations = extractDeclarations(path, source, names, MAX_RESULTS + 1 - result.declarations.length)
     result.declarations.push(...declarations)
     if (result.declarations.length > MAX_RESULTS) {
       result.declarations.length = MAX_RESULTS
