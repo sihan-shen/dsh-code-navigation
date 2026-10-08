@@ -1,0 +1,8 @@
+# Design notes and imported history are local working material.
+/docs/
+/archive/
+/HANDOFF.md
+/upstream/
+/.git-data/
+/node_modules/
+/dist/
