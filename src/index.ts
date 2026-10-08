@@ -60,18 +60,4 @@ export function apply(ctx: Context): void {
     },
   }))
 
-  // Stage 0 still needs one real Session call before this temporary probe can go.
-  ctx.tools.register(defineTool({
-    name: 'ci_rc_probe',
-    description: 'Return the current Harness session working directory for RC integration checks.',
-    parameters: {},
-    output: {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: value }],
-    },
-    async execute(_args, exec) {
-      if (exec.signal.aborted) throw new Error('Tool call was aborted')
-      return `rc-ok:${exec.agent?.session.header.cwd ?? 'no-session'}`
-    },
-  }))
 }
