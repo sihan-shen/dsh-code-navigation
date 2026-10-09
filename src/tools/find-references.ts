@@ -26,7 +26,7 @@ function renderReferences(value: ReferenceResult): string {
   }
   const target = value.candidates[0]
   const header = `Target ${target.path}:${target.line}:${target.character} ${target.kind}; references include declaration.\nServer returned ${value.returnedLocations} locations; unique ${value.uniqueLocations} locations / ${value.uniqueLines} starting lines / ${value.uniqueFiles} files.`
-  const blocks: string[] = []
+  const blocks: { file: ReferenceResult['files'][number]; rows: string[] }[] = []
   let length = header.length, shown = 0, sourceRowsShown = 0
   // Positions take priority over source context; a large snippet must not hide references.
   for (const file of value.files) {
@@ -34,23 +34,24 @@ function renderReferences(value: ReferenceResult): string {
       ...file.locations.map(l => `  ${l.range.start.line + 1}:${l.range.start.character + 1}-${l.range.end.line + 1}:${l.range.end.character + 1}`),
     ].join('\n')
     if (length + block.length + 1 > 3500) continue
-    blocks.push(block); length += block.length + 1; shown += file.locations.length
+    blocks.push({ file, rows: [block] }); length += block.length + 1; shown += file.locations.length
   }
-  for (const file of value.files) {
-    const title = `Source ${file.path}${file.reason ? ` (${file.reason})` : ''}`
-    if (length + title.length + 1 > 3500) continue
-    const rows = [title]
-    let blockLength = title.length
-    for (const line of file.lines) {
-      const row = `  ${line.line} | ${line.text}`
-      if (length + blockLength + row.length + 2 > 3500) continue
-      rows.push(row); blockLength += row.length + 1; sourceRowsShown++
+  // Reserve all displayed positions before filling each file block with source.
+  for (const { file, rows } of blocks) {
+    const hits = new Set(file.locations.map(location => location.range.start.line + 1))
+    if (file.reason) {
+      const row = `  Context: ${file.reason}`
+      if (length + row.length + 1 <= 3500) { rows.push(row); length += row.length + 1 }
     }
-    if (rows.length > 1 || file.reason) { blocks.push(rows.join('\n')); length += blockLength + 1 }
+    for (const line of file.lines) {
+      const row = `  ${hits.has(line.line) ? '*' : ' '}${line.line} | ${line.text}`
+      if (length + row.length + 1 > 3500) continue
+      rows.push(row); length += row.length + 1; sourceRowsShown++
+    }
   }
   const sourceRows = value.files.reduce((n, file) => n + file.lines.length, 0)
-  return [header, ...blocks,
-    `Shown ${shown} locations; omitted ${value.uniqueLocations - shown}. Source rows ${sourceRowsShown}/${sourceRows}; each row capped at 240 characters. Context is current text, not an atomic LSP snapshot.`,
+  return [header, ...blocks.map(block => block.rows.join('\n')),
+    `Shown ${shown} locations; omitted ${value.uniqueLocations - shown}. Source rows ${sourceRowsShown}/${sourceRows}; * marks reference starting lines. Import/export context capped at 12 lines; each row at 240 characters. Context is current text, not an atomic LSP snapshot.`,
     ...(value.status === 'empty' ? ['Server returned no references at this declaration; this is not a service failure.'] : []),
   ].join('\n')
 }

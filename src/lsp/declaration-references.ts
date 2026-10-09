@@ -3,6 +3,7 @@ import type { LspService, LspLocation } from '@deepseek-ai/dsh-lsp'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { extractDeclarations } from '../ast/typescript-declarations.js'
 import type { Declaration } from '../ast/typescript-declarations.js'
+import { referenceContextLines } from '../ast/typescript-reference-context.js'
 
 const MAX_FILE_BYTES = 128 * 1024
 const MAX_TOTAL_BYTES = 512 * 1024
@@ -141,16 +142,17 @@ export async function findDeclarationReferences(
       }
       attachedFiles++
       const lines = text.split(/\r\n|\n|\r/)
-      const needed = new Set<number>()
+      const positions: { line: number; character: number }[] = []
       for (const location of group.locations) {
         const start = location.range.start
         if (start.line < 0 || start.line >= lines.length || start.character < 0 || start.character > lines[start.line].length) {
           group.reason = 'a location does not match current source; verify file changes'
           continue
         }
-        for (let i = Math.max(0, start.line - 1); i <= Math.min(lines.length - 1, start.line + 1); i++) needed.add(i)
+        positions.push(start)
       }
-      group.lines = [...needed].sort((a, b) => a - b).map(i => ({ line: i + 1, text: lines[i].slice(0, 240) }))
+      group.lines = referenceContextLines(relativePath, text, positions)
+        .map(i => ({ line: i + 1, text: lines[i].slice(0, 240) }))
     } catch (error) {
       signal.throwIfAborted()
       group.reason = error instanceof Error ? error.message : 'source read failed'
