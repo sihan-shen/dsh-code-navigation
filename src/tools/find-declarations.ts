@@ -6,7 +6,7 @@ import { findDeclarations } from '../search/declaration-search.js'
 export function registerFindDeclarationsTool(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'ci_find_declarations',
-    description: 'Find exact-name TS/JS syntax declarations for up to 8 names in one call. Omit files for host grep candidate discovery in the Session workspace; provide workspace-relative files only when already known. Results contain path, line, kind and a line read from current source, so a separate grep/read is unnecessary for declaration location alone. Read surrounding code when its behavior matters. These are syntax facts, not resolved symbols.',
+    description: 'Find exact-name TS/JS syntax declarations for up to 8 names in one call. Omit files for host grep candidate discovery in the Session workspace; provide workspace-relative files only when already known. Results contain path, one-based line and UTF-16 character, kind and a line read from current source, so a separate grep/read is unnecessary for declaration location alone. When the host lsp tool is available, pass path as file_path and line/character unchanged to query semantic relationships at the declaration. Read surrounding code when its behavior matters. These are syntax facts, not resolved symbols.',
     parameters: {
       names: { type: 'array', required: true, items: { type: 'string' }, description: 'One to eight exact identifier names to find together.' },
       files: { type: 'array', items: { type: 'string' }, description: 'Optional: 1–20 known workspace-relative .ts, .tsx, .js or .jsx paths. Omit to discover candidates automatically; do not pass an empty array.' },
@@ -24,6 +24,7 @@ export function registerFindDeclarationsTool(ctx: Context): void {
                 name: { type: 'string', required: true },
                 path: { type: 'string', required: true },
                 line: { type: 'integer', required: true },
+                character: { type: 'integer', required: true },
                 kind: { type: 'string', required: true },
                 container: { type: 'string', required: true },
                 sourceLine: { type: 'string', required: true },
@@ -48,7 +49,7 @@ export function registerFindDeclarationsTool(ctx: Context): void {
         text: [
           `${args.files === undefined ? 'Host grep discovered candidates in the Session workspace' : 'Used provided candidate files'}; scanned ${value.filesScanned}, skipped ${value.skipped.length}; found ${value.declarations.length} declaration(s)${value.truncated ? ' (result limit reached)' : ''}.`,
           ...args.names.map(requested => `${requested}: ${value.declarations.filter(item => item.name === requested).length} declaration(s) in scanned files.`),
-          ...value.declarations.map(item => `${item.name} — ${item.path}:${item.line} ${item.kind}${item.container ? ` in ${item.container}` : ''}\n  ${item.sourceLine}`),
+          ...value.declarations.map(item => `${item.name} — ${item.path}:${item.line}:${item.character} ${item.kind}${item.container ? ` in ${item.container}` : ''}\n  ${item.sourceLine}`),
           ...value.skipped.map(item => `Skipped ${item.path}: ${item.reason}`),
         ].join('\n'),
       }],

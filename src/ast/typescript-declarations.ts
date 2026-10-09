@@ -4,6 +4,7 @@ export interface Declaration {
   name: string
   path: string
   line: number
+  character: number
   kind: string
   container: string
   sourceLine: string
@@ -47,11 +48,13 @@ export function extractDeclarations(path: string, source: string, names: Readonl
     const identifier = declarationName(node)
     const kind = declarationKind(node)
     if (identifier !== undefined && names.has(identifier.text) && kind !== undefined) {
-      const line = file.getLineAndCharacterOfPosition(identifier.getStart(file)).line + 1
+      const position = file.getLineAndCharacterOfPosition(identifier.getStart(file))
+      const line = position.line + 1
       found.push({
         name: identifier.text,
         path,
         line,
+        character: position.character + 1,
         kind,
         container: containers.join('.'),
         sourceLine: (lines[line - 1] ?? '').trim().slice(0, 240),
