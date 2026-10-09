@@ -1,7 +1,7 @@
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { extractDeclarations } from './declarations.js'
-import type { Declaration } from './declarations.js'
+import { extractDeclarations } from '../ast/typescript-declarations.js'
+import type { Declaration } from '../ast/typescript-declarations.js'
 
 const MAX_FILES = 20
 const MAX_NAMES = 8
