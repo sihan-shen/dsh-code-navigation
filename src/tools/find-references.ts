@@ -59,10 +59,10 @@ function renderReferences(value: ReferenceResult): string {
 export function registerFindReferencesTool(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'ci_find_references',
-    description: 'Find semantic references to one exact-name declaration in a known workspace-relative .ts file. Use this directly when the declaration file and name are known: it locates the unique syntax declaration, makes one host LSP query, and returns ranges plus bounded nearby source. Do not first enumerate textual references or read every file. Multiple declarations return candidates without querying LSP. Includes declarations and aliases; reports location, line and file counts separately. Snippets do not establish call hierarchy; read further only when needed for behavior, enclosing functions, ambiguity, truncation or conflicting source. For arbitrary use-sites or non-TS files use native lsp.',
+    description: 'Find semantic references when a declaration name and its workspace-relative .ts file are known. Call directly with file_path and name; no manual cursor or preliminary reference grep is needed. Unknown declaration path: first use ci_find_declarations. A unique declaration triggers one host LSP query; multiple declarations return candidates without a query, so select a candidate and use native lsp. Results include the declaration, exact ranges, counts and bounded source. Check omissions/context limits; read only missing behavior or enclosing code. Source snippets do not establish call hierarchy. For use-site cursors or other file types use native lsp.',
     parameters: {
-      file_path: { type: 'string', required: true, description: 'Known workspace-relative .ts declaration file.' },
-      name: { type: 'string', required: true, description: 'One exact declaration identifier; no import alias resolution or global name search.' },
+      file_path: { type: 'string', required: true, description: 'Known workspace-relative .ts file containing the declaration; use the selected declaration result path.' },
+      name: { type: 'string', required: true, description: 'Exact declared identifier in that file, not an import alias or regex; this tool does not search for files.' },
     },
     // Structured results retain precise ranges; only the model-facing presentation is capped.
     output: {

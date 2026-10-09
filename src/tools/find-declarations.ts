@@ -6,10 +6,10 @@ import { findDeclarations } from '../search/declaration-search.js'
 export function registerFindDeclarationsTool(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'ci_find_declarations',
-    description: 'Find exact-name TS/JS syntax declarations for up to 8 names in one call. Omit files for host grep candidate discovery in the Session workspace; provide workspace-relative files only when already known. Results contain path, one-based line and UTF-16 character, kind and a line read from current source, so a separate grep/read is unnecessary for declaration location alone. When the host lsp tool is available, pass path as file_path and line/character unchanged to query semantic relationships at the declaration. Read surrounding code when its behavior matters. These are syntax facts, not resolved symbols.',
+    description: 'Locate named TS/JS syntax declarations. Start here for declaration discovery: batch names and omit files unless already known; this tool runs candidate grep itself. Each result gives path, kind, container, sourceLine and one-based UTF-16 line/character. Same-name results may be different symbols: select the intended path/container. To find semantic references, pass that result to native lsp with operation=findReferences, file_path=path and line/character unchanged. Use bounded read for behavior or enclosing code; grep finds text, not symbol identity. Check skipped/truncated before claiming complete discovery.',
     parameters: {
-      names: { type: 'array', required: true, items: { type: 'string' }, description: 'One to eight exact identifier names to find together.' },
-      files: { type: 'array', items: { type: 'string' }, description: 'Optional: 1–20 known workspace-relative .ts, .tsx, .js or .jsx paths. Omit to discover candidates automatically; do not pass an empty array.' },
+      names: { type: 'array', required: true, items: { type: 'string' }, description: '1–8 exact identifiers, not regexes; batch related declaration queries.' },
+      files: { type: 'array', items: { type: 'string' }, description: 'Omit when paths are unknown: candidate grep is built in. Otherwise provide 1–20 known workspace-relative .ts/.tsx/.js/.jsx files; never an empty array.' },
     },
     output: {
       schema: {
