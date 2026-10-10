@@ -1,3 +1,4 @@
+import { contextDeclarations } from '../ast/typescript-context-ranges.js'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
@@ -17,8 +18,10 @@ export interface CodeFragment {
   startLine: number
   endLine: number
   text: string
-  source: 'lexical-window'
+  source: 'lexical-window' | 'declaration-context'
   matchedTerms: string[]
+  contextStartLine: number
+  contextEndLine: number
 }
 export interface ContextResult {
   matchesFound: number
@@ -49,57 +52,70 @@ function validateQuery(args: ContextQuery): { terms: string[]; path: string; lim
   return { terms, path: workspacePath(args.path ?? '.'), limit }
 }
 
-function compare(a: CodeFragment, b: CodeFragment): number {
-  return b.matchedTerms.length - a.matchedTerms.length
-    || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) || a.startLine - b.startLine
-}
+interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number }
 
-function windows(path: string, lines: string[], hits: number[], terms: string[], signal: AbortSignal, mark: (reason: string) => void): CodeFragment[] {
-  const ranges: { start: number; end: number }[] = []
+function sourceUnits(path: string, source: string, hits: number[], terms: string[], limit: number,
+  signal: AbortSignal, mark: (reason: string) => void): ContextUnit[] {
+  const lines = source.split('\n'), declarations = contextDeclarations(path, source)
+  const units = new Map<string, ContextUnit>()
   for (const hit of [...new Set(hits)].sort((a, b) => a - b)) {
-    const start = Math.max(0, hit - 1 - 8), end = Math.min(lines.length - 1, hit - 1 + 8)
-    const previous = ranges.at(-1)
-    if (previous && start <= previous.end + 1) previous.end = Math.max(previous.end, end)
-    else ranges.push({ start, end })
-  }
-  const fragments: CodeFragment[] = []
-  for (const range of ranges) {
-    let start = range.start
-    while (start <= range.end) {
-      signal.throwIfAborted()
-      let end = start, bytes = 0
-      const text: string[] = []
-      while (end <= range.end && text.length < 40) {
-        const size = encoder.encode(lines[end]).byteLength + (text.length ? 1 : 0)
-        if (bytes + size > MAX_BLOCK_BYTES) break
-        bytes += size
-        text.push(lines[end++])
+    signal.throwIfAborted()
+    const declaration = declarations.filter(r => r.start <= hit - 1 && r.end >= hit - 1)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]
+    let start = declaration?.start ?? Math.max(0, hit - 1 - 8)
+    let end = declaration?.end ?? Math.min(lines.length - 1, hit - 1 + 8)
+    let kind: CodeFragment['source'] = declaration ? 'declaration-context' : 'lexical-window'
+    function split(first: number, last: number): CodeFragment[] | undefined {
+      const pieces: CodeFragment[] = []
+      for (let cursor = first; cursor <= last;) {
+        signal.throwIfAborted()
+        const text: string[] = []; let bytes = 0, next = cursor
+        while (next <= last && text.length < 40) {
+          const size = encoder.encode(lines[next]).byteLength + (text.length ? 1 : 0)
+          if (bytes + size > MAX_BLOCK_BYTES) break
+          bytes += size; text.push(lines[next++])
+        }
+        if (!text.length) return undefined
+        const content = text.join('\n')
+        pieces.push({ path, startLine: cursor + 1, endLine: next, text: content, source: kind,
+          matchedTerms: terms.filter(term => content.includes(term)), contextStartLine: first + 1, contextEndLine: last + 1 })
+        cursor = next
       }
-      if (text.length === 0) { mark('source line exceeds 2 KiB'); start++; continue }
-      if (end <= range.end) mark('window split by line or byte budget')
-      const content = text.join('\n')
-      const matchedTerms = terms.filter(term => content.includes(term))
-      // Context-only pieces do not displace fragments that contain a query term.
-      if (matchedTerms.length) fragments.push({ path, startLine: start + 1, endLine: end,
-        text: content, source: 'lexical-window', matchedTerms })
-      start = end
+      return pieces
     }
+    let fragments = split(start, end)
+    if (declaration && (!fragments || fragments.length > limit
+      || fragments.reduce((n, f) => n + encoder.encode(f.text).byteLength, 0) > MAX_TEXT_BYTES)) {
+      mark('declaration context exceeds result budget; lexical fallback is partial')
+      start = Math.max(0, hit - 1 - 8); end = Math.min(lines.length - 1, hit - 1 + 8)
+      kind = 'lexical-window'; fragments = split(start, end)
+    }
+    if (!fragments) { mark('source line exceeds 2 KiB'); continue }
+    const content = lines.slice(start, end + 1).join('\n')
+    // Keep every piece of the associated range, including pieces without a query term.
+    units.set(`${start}:${end}:${kind}`, { fragments, terms: terms.filter(term => content.includes(term)),
+      name: kind === 'declaration-context' ? declaration!.name : '', path, start })
   }
-  return fragments
+  return [...units.values()]
 }
 
 export async function searchCodeContext(
   fs: FileSystem, tools: ToolRuntime, args: ContextQuery, exec: ToolExecution,
 ): Promise<ContextResult> {
-  const { terms, path, limit } = validateQuery(args)
+  const rawPath = args.path ?? '.'
+  // Absolute paths are accepted only after provider containment checks below.
+  const absolute = rawPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rawPath)
+  const { terms, path: relativePath, limit } = validateQuery({ ...args, path: absolute ? '.' : rawPath })
   const cwd = exec.agent?.session.header.cwd
   if (!cwd) throw new Error('A Harness Session workspace is required')
   exec.signal.throwIfAborted()
   const root = await fs.resolve('.', { cwd, signal: exec.signal })
   // Host grep runs a process in Session cwd; remote FS worlds must not be mixed with it.
   if (fs.processPath(root).replace(/[\\/]+$/, '') !== cwd.replace(/[\\/]+$/, '')) throw new Error('host grep and fs must use the same Session process workspace')
-  const scope = await fs.resolve(path, { cwd, signal: exec.signal })
+  const scope = await fs.resolve(absolute ? rawPath : relativePath, { cwd, signal: exec.signal })
   if (!fs.contains(root, scope)) throw new Error('search path is outside the Session workspace')
+  const scopePath = fs.processPath(scope), rootPath = fs.processPath(root).replace(/[\\/]+$/, '')
+  const path = workspacePath(scopePath === rootPath ? '.' : scopePath.slice(rootPath.length + 1).replace(/\\/g, '/'))
   if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable')
   const pattern = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
   const outcome = await tools.execute({ name: 'grep', arguments: { pattern, path, include: '*.{ts,tsx,js,jsx}' },
@@ -138,7 +154,7 @@ export async function searchCodeContext(
   }
   candidates.sort((a, b) => b.entry.terms.size - a.entry.terms.size || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
   if (candidates.length > MAX_FILES) mark('candidate file limit (12)')
-  const fragments: CodeFragment[] = []
+  const units: ContextUnit[] = []
   for (const { file, entry, target } of candidates.slice(0, MAX_FILES)) {
     exec.signal.throwIfAborted()
     const skip = (reason: string) => { result.skipped.push({ path: file, reason }); mark('partial source coverage') }
@@ -166,24 +182,39 @@ export async function searchCodeContext(
       })
       if (hits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
       if (hits.some(hit => encoder.encode(lines[hit.line - 1]).byteLength > MAX_BLOCK_BYTES)) mark('matched line exceeds 2 KiB')
-      const found = windows(file, lines, hits.map(hit => hit.line), terms, exec.signal, mark)
-      fragments.push(...found)
+      units.push(...sourceUnits(file, source, hits.map(hit => hit.line), terms, limit, exec.signal, mark))
     } catch {
       exec.signal.throwIfAborted()
       skip('source read or decode failed')
     }
   }
-  fragments.sort(compare)
-  if (fragments.length > MAX_WINDOWS) mark('candidate window limit (120)')
-  if (fragments.length > limit) mark(`result limit (${limit})`)
+  const weight = (term: string) => Math.log(1 + files.size / Math.max(1,
+    [...files.values()].filter(entry => entry.terms.has(term)).length))
+  const score = (unit: ContextUnit) => (terms.includes(unit.name) ? 1000 : 0)
+    + unit.terms.reduce((n, term) => n + weight(term), 0)
+      * (unit.fragments[0].source === 'declaration-context' ? 2 : 1)
+
+  units.sort((a, b) => score(b) - score(a) || a.path.localeCompare(b.path) || a.start - b.start)
+  if (units.length > MAX_WINDOWS) mark('candidate context limit (120)')
+  const remaining = units.slice(0, MAX_WINDOWS)
+  const represented = new Set<string>()
   let textBytes = 0
-  for (const fragment of fragments.slice(0, MAX_WINDOWS)) {
+  while (remaining.length) {
     exec.signal.throwIfAborted()
-    if (result.fragments.length >= limit) break
-    const size = encoder.encode(fragment.text).byteLength
-    if (textBytes + size > MAX_TEXT_BYTES) { mark('fragment text budget (8 KiB)'); continue }
-    textBytes += size
-    result.fragments.push(fragment)
+    // Exact declaration anchors precede diversification; then prefer an unseen file.
+    let index = remaining.findIndex(unit => terms.includes(unit.name))
+    if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
+    if (index < 0) index = 0
+    const unit = remaining.splice(index, 1)[0]
+    const size = unit.fragments.reduce((n, f) => n + encoder.encode(f.text).byteLength, 0)
+    if (result.fragments.length + unit.fragments.length > limit || textBytes + size > MAX_TEXT_BYTES) {
+      mark('result context omitted by fragment/text budget'); continue
+    }
+    // Avoid sending overlapping lines twice without splitting declaration units.
+    if (unit.fragments.every(f => result.fragments.some(old => old.path === f.path
+      && old.startLine <= f.startLine && old.endLine >= f.endLine))) continue
+    textBytes += size; result.fragments.push(...unit.fragments); represented.add(unit.path)
   }
+
   return result
 }
