@@ -81,7 +81,8 @@ export async function findDeclarationReferences(
     result.reads++
     const bytes = await fs.readBytes(file, signal, cap)
     result.bytesRead += bytes.byteLength
-    const source = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    // The host reads the original file; stripping BOM shifts first-line columns.
+    const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
     if (source.includes('\0')) throw new Error('binary source')
     // Refund unused reservation only on a completed bounded read.
     remaining += cap - bytes.byteLength

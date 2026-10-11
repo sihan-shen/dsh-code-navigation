@@ -100,7 +100,8 @@ export async function findDeclarations(
     let source: string
     try {
       const bytes = await fs.readBytes(target, exec.signal, MAX_FILE_BYTES)
-      source = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+      // Preserve BOM so syntax coordinates stay aligned with the original file.
+      source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
       if (source.includes('\0')) throw new Error('binary content')
     } catch (error) {
       exec.signal.throwIfAborted()
