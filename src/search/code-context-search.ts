@@ -57,7 +57,8 @@ interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<
 
 function sourceUnits(path: string, source: string, hits: number[], terms: string[], limit: number,
   signal: AbortSignal, mark: (reason: string) => void): ContextUnit[] {
-  const lines = source.split('\n'), declarations = contextDeclarations(path, source)
+  const lines = source.split('\n'), declarations = contextDeclarations(path, source,
+    reason => mark(`${path}: ${reason}`))
   const units = new Map<string, ContextUnit>()
   for (const hit of [...new Set(hits)].sort((a, b) => a - b)) {
     signal.throwIfAborted()

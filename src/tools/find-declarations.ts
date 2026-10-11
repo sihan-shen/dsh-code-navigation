@@ -1,12 +1,20 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-fs'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import { findDeclarations } from '../search/declaration-search.js'
 
 export function registerFindDeclarationsTool(ctx: Context): void {
+  ctx.inject(['systemPrompt'], scoped => {
+    scoped.systemPrompt.section({
+      name: 'tool:ci_find_declarations', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 2,
+      text: ({ scope }) => scoped.tools.get('ci_find_declarations', scope) === undefined ? ''
+        : 'Use ci_find_declarations to locate exact named TS/JS declarations and cursor coordinates; batch related names. It returns a first-line preview, not a complete signature or inferred type. Read only missing implementation or signature ranges. Use native lsp at a surviving call site for definitions or hover when available; use findReferences at a selected declaration only when its uses matter. A deleted declaration cannot supply semantic evidence. Do not repeat an unchanged empty query.',
+    })
+  })
   ctx.tools.register(defineTool({
     name: 'ci_find_declarations',
-    description: 'Locate named TS/JS syntax declarations. Start here for declaration discovery: batch names and omit files unless already known; this tool runs candidate grep itself. Each result gives path, kind, container, sourceLine and one-based UTF-16 line/character. Same-name results may be different symbols: select the intended path/container. When native lsp is available and semantic references are needed, pass the selected result to it with operation=findReferences, file_path=path and line/character unchanged. Use bounded read for behavior or enclosing code; grep finds text, not symbol identity. Only direct identifier names on functions, classes, interfaces, types, enums, variables and methods are supported; destructured bindings are not. Candidate grep can miss escaped identifier spellings: provide known files explicitly. Zero results do not prove a symbol is absent. Check skipped/truncated before claiming complete discovery.',
+    description: 'Locate exact named TS/JS syntax declarations and one-based UTF-16 cursor coordinates. Batch names; omit files when paths are unknown (candidate grep is built in). Returns path, kind, container and a first-line preview capped at 240 characters, not a complete signature or inferred type. Read missing signature or implementation ranges only. Same-name results can be different symbols: select by path/container. If uses matter, pass the selected path/line/character unchanged to native lsp findReferences when available. For definition or hover, query a surviving call site instead; deleted declarations cannot be resolved. Supports direct identifier names on functions, classes, interfaces, types, enums, variables and methods, not destructured bindings. Escaped spellings may require explicit files. Check skipped/truncated; zero results do not prove absence.',
     parameters: {
       names: { type: 'array', required: true, items: { type: 'string' }, description: '1–8 exact identifiers, not regexes; batch related declaration queries, e.g. ["apply", "createSession"].' },
       files: { type: 'array', items: { type: 'string' }, description: 'Omit when paths are unknown: candidate grep is built in. Otherwise provide 1–20 known workspace-relative .ts/.tsx/.js/.jsx files; never an empty array.' },
