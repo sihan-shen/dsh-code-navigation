@@ -1,6 +1,6 @@
 import ts from 'typescript'
 
-export interface ContextRange { start: number; end: number; name: string }
+export interface ContextRange { start: number; end: number; matchStart: number; name: string }
 
 // Syntax boundaries only: no symbol resolution or inferred dependency edges.
 export function contextDeclarations(path: string, source: string): ContextRange[] {
@@ -12,9 +12,13 @@ export function contextDeclarations(path: string, source: string): ContextRange[
   const ranges: ContextRange[] = []
   function visit(node: ts.Node): void {
     if ((ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node)) && node.body) {
-      const start = file.getLineAndCharacterOfPosition(node.getFullStart()).line
+      const matchStart = file.getLineAndCharacterOfPosition(node.getStart(file)).line
+      const fullStart = node.getFullStart()
+      let start = file.getLineAndCharacterOfPosition(fullStart).line
+      // Leading trivia may begin after another statement on the same line.
+      if (source.slice(file.getLineStarts()[start], fullStart).trim()) start = Math.min(start + 1, matchStart)
       const end = file.getLineAndCharacterOfPosition(Math.max(node.getStart(file), node.end - 1)).line
-      if (end - start < 80) ranges.push({ start, end, name: node.name?.getText(file) ?? '' })
+      if (end - start < 80) ranges.push({ start, end, matchStart, name: node.name?.getText(file) ?? '' })
     }
     ts.forEachChild(node, visit)
   }

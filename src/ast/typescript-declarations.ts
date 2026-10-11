@@ -40,7 +40,7 @@ function declarationName(node: ts.Node): ts.Identifier | undefined {
 
 export function extractDeclarations(path: string, source: string, names: ReadonlySet<string>, limit: number): Declaration[] {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
-  const lines = source.split(/\r?\n/)
+  const lineStarts = file.getLineStarts()
   const found: Declaration[] = []
 
   function visit(node: ts.Node, containers: string[]): void {
@@ -57,7 +57,7 @@ export function extractDeclarations(path: string, source: string, names: Readonl
         character: position.character + 1,
         kind,
         container: containers.join('.'),
-        sourceLine: (lines[line - 1] ?? '').trim().slice(0, 240),
+        sourceLine: source.slice(lineStarts[position.line], lineStarts[position.line + 1] ?? source.length).trim().slice(0, 240),
       })
     }
     const next = identifier && (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)

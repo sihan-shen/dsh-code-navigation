@@ -53,6 +53,7 @@ function validateQuery(args: ContextQuery): { terms: string[]; path: string; lim
 }
 
 interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number }
+interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string> }
 
 function sourceUnits(path: string, source: string, hits: number[], terms: string[], limit: number,
   signal: AbortSignal, mark: (reason: string) => void): ContextUnit[] {
@@ -60,8 +61,14 @@ function sourceUnits(path: string, source: string, hits: number[], terms: string
   const units = new Map<string, ContextUnit>()
   for (const hit of [...new Set(hits)].sort((a, b) => a - b)) {
     signal.throwIfAborted()
-    const declaration = declarations.filter(r => r.start <= hit - 1 && r.end >= hit - 1)
-      .sort((a, b) => (a.end - a.start) - (b.end - b.start))[0]
+    const enclosing = declarations.filter(r => r.matchStart <= hit - 1 && r.end >= hit - 1)
+      .sort((a, b) => (a.end - a.matchStart) - (b.end - b.matchStart))
+    const anchors = enclosing.filter(r => r.matchStart === hit - 1 && terms.includes(r.name)
+      && lines[hit - 1].includes(r.name))
+    // Line-only grep cannot disambiguate multiple declarations beginning on one line.
+    const sameLine = enclosing.filter(r => r.matchStart === hit - 1)
+    const declaration = anchors.length === 1 ? anchors[0]
+      : sameLine.length > 1 ? undefined : enclosing[0]
     let start = declaration?.start ?? Math.max(0, hit - 1 - 8)
     let end = declaration?.end ?? Math.min(lines.length - 1, hit - 1 + 8)
     let kind: CodeFragment['source'] = declaration ? 'declaration-context' : 'lexical-window'
@@ -128,7 +135,7 @@ export async function searchCodeContext(
     throw new Error('host grep returned no structured matches')
   }
   if (value.matches.length > MAX_MATCHES) throw new Error('host grep found more than 2000 matches; narrow path or terms')
-  const files = new Map<string, { hits: { line: number; text: string }[]; terms: Set<string> }>()
+  const files = new Map<string, CandidateMatches>()
   for (const match of value.matches) {
     exec.signal.throwIfAborted()
     if (typeof match !== 'object' || match === null || typeof match.path !== 'string'
@@ -146,16 +153,29 @@ export async function searchCodeContext(
     filesRead: 0, bytesRead: 0, skipped: [], limits: [], truncated: false, fragments: [] }
   const mark = (reason: string) => { result.truncated = true; if (!result.limits.includes(reason)) result.limits.push(reason) }
   // Validate every candidate before dropping any due to a resource budget.
-  const candidates = []
+  const candidates: { file: string; entry: CandidateMatches; target: Awaited<ReturnType<FileSystem['resolve']>> }[] = []
   for (const [file, entry] of files) {
     const target = await fs.resolve(file, { cwd, signal: exec.signal })
     if (!fs.contains(root, target) || !fs.contains(scope, target)) throw new Error(`candidate is outside search scope: ${file}`)
     candidates.push({ file, entry, target })
   }
   candidates.sort((a, b) => b.entry.terms.size - a.entry.terms.size || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
+  // Reserve a candidate for every query term before common multi-term files fill the cap.
+  // This preserves lexical coverage, not a semantic declaration guarantee.
+  const selected = new Set<typeof candidates[number]>()
+  for (const term of [...terms].sort((a, b) =>
+    candidates.filter(c => c.entry.terms.has(a)).length - candidates.filter(c => c.entry.terms.has(b)).length)) {
+    if ([...selected].some(c => c.entry.terms.has(term))) continue
+    const candidate = candidates.find(c => c.entry.terms.has(term))
+    if (candidate) selected.add(candidate)
+  }
+  for (const candidate of candidates) {
+    if (selected.size >= MAX_FILES) break
+    selected.add(candidate)
+  }
   if (candidates.length > MAX_FILES) mark('candidate file limit (12)')
   const units: ContextUnit[] = []
-  for (const { file, entry, target } of candidates.slice(0, MAX_FILES)) {
+  for (const { file, entry, target } of selected) {
     exec.signal.throwIfAborted()
     const skip = (reason: string) => { result.skipped.push({ path: file, reason }); mark('partial source coverage') }
     try {
@@ -168,6 +188,8 @@ export async function searchCodeContext(
       result.filesRead++
       const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
       if (source.includes('\0')) { skip('binary content'); continue }
+      // grep uses LF records, while TypeScript also treats these as line breaks.
+      if (/\r(?!\n)|[\u2028\u2029]/.test(source)) { skip('unsupported line separators; use explicit file reading'); continue }
       const lines = source.split('\n')
       const hits = entry.hits.filter(hit => {
         let current = lines[hit.line - 1]
@@ -206,13 +228,21 @@ export async function searchCodeContext(
     if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
     if (index < 0) index = 0
     const unit = remaining.splice(index, 1)[0]
+    // Covered units add no source and must not trigger a missing-context warning.
+    if (unit.fragments.every(f => {
+      let nextLine = f.startLine
+      for (const old of result.fragments.filter(old => old.path === f.path)
+        .sort((a, b) => a.startLine - b.startLine)) {
+        if (old.startLine > nextLine) break
+        nextLine = Math.max(nextLine, old.endLine + 1)
+        if (nextLine > f.endLine) return true
+      }
+      return false
+    })) continue
     const size = unit.fragments.reduce((n, f) => n + encoder.encode(f.text).byteLength, 0)
     if (result.fragments.length + unit.fragments.length > limit || textBytes + size > MAX_TEXT_BYTES) {
       mark('result context omitted by fragment/text budget'); continue
     }
-    // Avoid sending overlapping lines twice without splitting declaration units.
-    if (unit.fragments.every(f => result.fragments.some(old => old.path === f.path
-      && old.startLine <= f.startLine && old.endLine >= f.endLine))) continue
     textBytes += size; result.fragments.push(...unit.fragments); represented.add(unit.path)
   }
 
