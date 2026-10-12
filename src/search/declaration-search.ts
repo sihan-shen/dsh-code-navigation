@@ -64,7 +64,10 @@ async function discoverFiles(tools: ToolRuntime, names: ReadonlySet<string>, exe
       throw new Error('host grep returned an invalid candidate path')
     }
     paths.add(match.path)
-    if (paths.size > MAX_FILES) throw new Error(`host grep found more than ${MAX_FILES} candidate files; provide a narrower files list`)
+    if (paths.size > MAX_FILES) {
+      const shown = [...paths].filter(path => path.length <= 512).slice(0, MAX_FILES)
+      throw new Error(`host grep found at least ${paths.size} candidate files; automatic discovery permits at most ${MAX_FILES}. No files parsed. Text-match candidates below are a truncated discovery-order list, not verified declarations or a ranking: ${JSON.stringify(shown)}. Confirm relevant paths using these clues or grep/glob/context search, then retry only if declaration identity or coordinates are still needed: ${JSON.stringify({ names: [...names], files: ['<confirmed workspace-relative file>'] })}. Keep names unchanged and provide 1–${MAX_FILES} confirmed files; do not retry the unchanged unscoped query.`)
+    }
   }
   return [...paths]
 }
