@@ -11,11 +11,13 @@ export const inject = ['tools', 'fs']
 export function apply(ctx: Context, config: {
   /** 批量定义导航与前置指导；默认关闭，须宿主 LSP 服务。 */
   enablePrecedingLsp?: boolean
+  /** 默认注册声明AST；只需使用点导航的任务可关闭以减少可见协议。 */
+  enableFindDeclarations?: boolean
   enableDeclarationReferences?: boolean
   enableCodeContext?: boolean
   enableToolCooperationPrompt?: boolean
 } = {}): void {
-  registerFindDeclarationsTool(ctx)
+  if (config.enableFindDeclarations !== false) registerFindDeclarationsTool(ctx)
   if (config.enableToolCooperationPrompt === true) registerToolCooperationPrompt(ctx)
   if (config.enableCodeContext === true) registerSearchContextTool(ctx)
   if (config.enablePrecedingLsp === true) {
