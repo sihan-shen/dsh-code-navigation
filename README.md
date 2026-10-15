@@ -1,6 +1,6 @@
 # dsh-code-intelligence
 
-DeepSeek Harness 的单包代码检索插件：默认提供 AST 声明定位，可按需启用词法源码检索、声明引用查询和前置批量 LSP 定义导航。目标是让 Agent 用较少的重复阅读获取足够证据；目前尚未证明稳定降低总 Token 消耗。
+DeepSeek Harness 的单包代码检索插件：默认提供 AST 声明定位，可按需启用词法源码检索、固定文件语义检索、声明引用查询和前置批量 LSP 定义导航。目标是让 Agent 用较少的重复阅读获取足够证据；目前尚未证明稳定降低总 Token 消耗。
 
 2026-10-14的新仓库对照（4仓库、8题、两组各重复2次）中，前置LSP插件总Token比原生read/grep/glob/lsp高5.5%；正常入口子组低19.2%，超出64 KiB入口限制的子组高69.2%。较少阅读没有转化为整体成本下降，前置LSP仍默认关闭。
 
@@ -40,6 +40,7 @@ await ctx.plugin(codeIntelligence, {
 | `enableDeclarationReferences` | `false` | 有宿主 LSP 服务时注册 `ci_find_references` |
 | `enablePrecedingLsp` | `false` | 有宿主 LSP 服务时注册 `ci_batch_definitions`，并提供前置导航指导 |
 | `enableToolCooperationPrompt` | `false` | 注入按实际可见工具生成的协同使用指导 |
+| `semanticIndex` | 未配置 | 注册 `ci_search_semantic_context`；须显式准备固定文件索引并提供本地 embedding 函数 |
 
 `ci_find_declarations` 默认注册，`enableFindDeclarations: false` 可关闭；前置LSP的内部语法解析不依赖该声明工具。前置 LSP 自身的指导段不依赖 `enableToolCooperationPrompt`。没有 LSP 服务时不会注册两个 LSP 扩展工具；有服务但没有匹配 provider 时如实返回错误。
 
@@ -67,7 +68,57 @@ await ctx.plugin(codeIntelligence, {
 
 每片最多 40 行、2 KiB，源码总量最多 8 KiB，渲染最多 10 KiB。返回编号源码、路径、关联上下文范围和截断/跳过信息。词法命中不证明语义关系或完整覆盖。
 
-当前产品没有向量检索、图 RAG、树索引、持久库或增量索引。既有本地向量实验不属于插件运行时能力。
+该词法工具不调用 embedding，不依赖语义索引。可选的固定文件向量召回见下节；既有本地向量实验的收益不代表当前产品已通过效果验收。
+
+### `ci_search_semantic_context`：固定文件语义检索
+
+```json
+{"query": "超时后如何取消请求并清理资源", "path": "src", "limit": 4}
+```
+
+适合名称未知、能够描述行为的 TS/JS 问题。它在操作者明确准备的文件集合内做精确 cosine 排序，返回编号源码及支持的 AST 声明位置、范围和最近命名父声明。`query` 为 1–1000 字符，`path` 为可选的工作区相对文件/目录，`limit` 为 1–6、默认 4；范围外不自动发现文件。相似度不证明调用或绑定关系，语法包含不等于业务或运行时关系。
+
+先通过同包 `semantic-index` 子入口显式准备，再加载插件；主入口仍只导出 `name`、`inject`、`apply`。以下装配函数接收你已有的本地 embedding 实现：
+
+```ts
+import type { Context } from '@deepseek-ai/cordis'
+import * as codeIntelligence from '/absolute/path/to/dsh-code-intelligence-new/dist/index.js'
+import {
+  prepareSemanticIndex,
+  type LocalEmbedding,
+} from '/absolute/path/to/dsh-code-intelligence-new/dist/semantic/index.js'
+
+async function attachSemanticSearch(ctx: Context, cwd: string, embedding: LocalEmbedding) {
+  const semanticIndex = {
+    files: ['src/session.ts', 'src/request.ts'], // 替换为明确的源码范围
+    embedding,
+  }
+  const preparation = await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+  await ctx.plugin(codeIntelligence, { semanticIndex })
+  return preparation
+}
+```
+
+作为包导入时，准备入口为 `dsh-code-intelligence/semantic-index`。embedding 合同为：
+
+```ts
+interface LocalEmbedding {
+  id: string
+  dimensions: number
+  embed(texts: readonly string[], purpose: 'document' | 'query', signal: AbortSignal):
+    Promise<readonly (readonly number[])[]>
+}
+```
+
+`id` 必须包含准确模型修订、pooling、预处理和 query/document 指令版本；改变任一项应换 ID 并重建。`embed` 返回与输入顺序一致的有限非零向量，维度为 `dimensions`（1–4096）；文档输入是 `path:start-end` 加原始连续源码，问题输入是原始查询，适用的不同指令由适配器按 `purpose` 处理。适配器须将 `signal` 传给本地后端并配合取消。插件不内置模型、网络客户端或下载逻辑；函数应连接你选择的本地模型，插件无法验证任意回调内部使用的服务。
+
+快照保存在各工作区的 `.code-intelligence/semantic-index.json`，包含源码、向量及 AST 元数据，默认忽略不纳入 Git。固定集合为 1–32 个 `.ts/.tsx/.js/.jsx` 文件，单文件最多 1 MiB、总计 4 MiB；每块最多 40 行/2 KiB、重叠最多 8 行，超长单行明确省略。最多 2048 块、4096 声明、2097152 个向量数值、64 MiB 快照；不完整 AST 或其他缺口会标记。查询合并重叠源码行，源文本总计最多 8 KiB、渲染最多 10 KiB。
+
+再次准备会直接复用有效快照，`embeddedDocuments: 0`，跨进程也不重复计算文档向量或 AST；每次有候选的查询只计算一个问题向量。准备结果区分 `created/rebuilt/reused`，记录文档数、声明数、源码/索引字节和耗时；查询记录候选数、embedding 次数及耗时。没有问题向量缓存，也没有内存常驻模型或索引服务。
+
+缺索引时，工具要求操作者运行准备 API。文件改动、删除/改名、固定范围、模型 ID/维度或 TypeScript/快照格式变化后，拒绝复用，须显式调用 `prepareSemanticIndex(ctx.fs, semanticIndex, { cwd, rebuild: true })` 整体重建；查询不自动更新、不悄悄回退词法。源码变化依据宿主的文件版本与 canonical identity；没有哈希检查，前后版本复核也不是原子仓库快照。不同工作区/worktree 不共享索引，缓存目录/文件不接受符号链接，源码别名须仍处于工作区内。
+
+目前没有持久符号关系图、摘要树或增量更新。第一阶段验证覆盖准备、复用和失效合同；真实 embedding 的概念召回、同预算词法对照及完整 Agent Token 收益仍待独立评测，默认配置不启用语义检索。
 
 ### `ci_find_references`：已知声明的引用
 

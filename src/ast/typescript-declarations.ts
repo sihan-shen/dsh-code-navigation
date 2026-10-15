@@ -38,6 +38,44 @@ function declarationName(node: ts.Node): ts.Identifier | undefined {
   return undefined
 }
 
+export interface DeclarationNode {
+  id: string
+  parentId: string
+  name: string
+  kind: string
+  line: number
+  character: number
+  startLine: number
+  endLine: number
+}
+
+/** 单文件的命名声明包含关系；不解析绑定，也不推断调用关系。 */
+export function extractDeclarationTree(path: string, source: string): {
+  declarations: DeclarationNode[]; syntaxError: boolean
+} {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
+  const syntaxError = !!(file as ts.SourceFile & { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length
+  if (syntaxError) return { declarations: [], syntaxError }
+  const declarations: DeclarationNode[] = []
+  function visit(node: ts.Node, parentId: string): void {
+    const identifier = declarationName(node), kind = declarationKind(node)
+    let nextParent = parentId
+    if (identifier && kind) {
+      if (declarations.length >= 4096) throw new Error('semantic index exceeds 4096 declarations')
+      const position = file.getLineAndCharacterOfPosition(identifier.getStart(file))
+      const id = `${path}:${position.line + 1}:${position.character + 1}`
+      declarations.push({ id, parentId, name: identifier.text, kind,
+        line: position.line + 1, character: position.character + 1,
+        startLine: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
+        endLine: file.getLineAndCharacterOfPosition(Math.max(node.getStart(file), node.end - 1)).line + 1 })
+      nextParent = id
+    }
+    ts.forEachChild(node, child => visit(child, nextParent))
+  }
+  visit(file, '')
+  return { declarations, syntaxError }
+}
+
 export function extractDeclarations(path: string, source: string, names: ReadonlySet<string>, limit: number): Declaration[] {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
   const lineStarts = file.getLineStarts()
