@@ -118,7 +118,35 @@ interface LocalEmbedding {
 
 缺索引时，工具要求操作者运行准备 API。文件改动、删除/改名、固定范围、模型 ID/维度或 TypeScript/快照格式变化后，拒绝复用，须显式调用 `prepareSemanticIndex(ctx.fs, semanticIndex, { cwd, rebuild: true })` 整体重建；查询不自动更新、不悄悄回退词法。源码变化依据宿主的文件版本与 canonical identity；没有哈希检查，前后版本复核也不是原子仓库快照。不同工作区/worktree 不共享索引，缓存目录/文件不接受符号链接，源码别名须仍处于工作区内。
 
-目前没有持久符号关系图、摘要树或增量更新。第一阶段验证覆盖准备、复用和失效合同；真实 embedding 的概念召回、同预算词法对照及完整 Agent Token 收益仍待独立评测，默认配置不启用语义检索。
+固定本地 Qwen3-Embedding-0.6B 的一次开发语料验证已完成：8文件55块，三题必要可见事实向量5/6、带人工实现词的词法6/6，未证明通用召回或完整 Agent Token 收益。默认配置不启用语义检索；没有摘要树或增量更新。
+
+
+### 可选的持久一跳引用
+
+在同一 `semanticIndex` 中增加 `relations`，先完成向量准备，再调用同包子入口的 `prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })`。构建时需要已有宿主 LSP 服务，插件不启动语言服务器；查询和复用只读磁盘，不调用 LSP。
+
+```ts
+import { prepareSemanticIndex, prepareSemanticRelations } from 'dsh-code-intelligence/semantic-index'
+
+const semanticIndex = {
+  files: ['src/service.ts', 'src/caller.ts'],
+  embedding: localEmbedding,
+  relations: {
+    lspId: 'my-typescript-provider@version;toolchain-and-config-v1',
+    environmentFiles: ['tsconfig.json', 'package.json', 'pnpm-lock.yaml'],
+    anchors: [{ path: 'src/service.ts', line: 12, character: 23 }],
+  },
+}
+await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+await prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })
+await ctx.plugin(codeIntelligence, { semanticIndex })
+```
+
+锚点必须是已准备源码中支持的命名声明的精确一基 UTF-16 名称坐标，1–8个；每个锚点一次公开 `findReferences`，最多处理前256个位置、保存24个不同使用点。只保存固定源码集合内、精确匹配 AST 标识符的使用点；声明、import 声明、范围外/未知语法及额度省略有计数。这是对该锚点符号的静态 `references`，附 `callee/argument/other` 语法角色和最近支持的容器 ID；参数不是调用，callee 不证明运行时执行，也不证明重载唯一实现。非标识符、计算属性等未覆盖位置不会猜选。
+
+关系单独存入 `.code-intelligence/semantic-relations.json`（最多512KiB），绑定向量快照的宿主版本及所有源码版本，并记录1–16个显式环境文件的 canonical identity/版本。`lspId` 由操作者标识实际 provider、工具链与配置，宿主未返回 provider 身份供验证；环境文件不是完整依赖闭包，未列入的配置、依赖和工具链变化须更新 ID 并显式重建。索引重建、环境文件/关系配置变化后调用 `prepareSemanticRelations(..., { cwd, rebuild: true })`，缺失/损坏/过期不自动修复或回退。
+
+配置后查询默认扩展：只从原向量排名块中出现声明名称位置的锚点取入向引用，最多一跳、8条/2KiB映射，`path` 同时约束种子与引用来源。返回 `relations` 的源/目标坐标与版本、语法角色及容器，`relationIndexCreatedAt/relationIndexBytes/lspQueries` 说明复用情况。扩展源码先占最多3KiB，种子源码使用剩余预算；总源码仍8KiB、渲染仍10KiB，可能挤出种子证据，所有省略会标记。`expand_relations: false` 保留相同向量种子的不扩展对照，也可在关系快照暂时不可用时明确选择它。没有递归、自动全仓建图、查询缓存或运行时调用图。
 
 ### `ci_find_references`：已知声明的引用
 

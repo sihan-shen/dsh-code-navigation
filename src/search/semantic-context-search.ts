@@ -2,10 +2,12 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { DeclarationNode } from '../ast/typescript-declarations.js'
 import { chunkText, normalizeVectors } from '../semantic/chunks.js'
 import { loadSnapshot, snapshotLocation, verifySnapshot } from '../semantic/snapshot.js'
+import { loadRelations, verifyRelations } from '../semantic/relations.js'
+import type { ReferenceEvidence } from '../semantic/relations.js'
 import { encoder, relativePath, resolveConfig } from '../semantic/types.js'
 import type { IndexExecution, SemanticIndexConfig, SourceChunk } from '../semantic/types.js'
 
-export interface SemanticQuery { query: string; path?: string; limit?: number }
+export interface SemanticQuery { query: string; path?: string; limit?: number; expand_relations?: boolean }
 export interface SemanticContextResult {
   indexCreatedAt: string
   embeddingId: string
@@ -18,6 +20,10 @@ export interface SemanticContextResult {
   truncated: boolean
   limits: string[]
   hits: (SourceChunk & { score: number; declarations: DeclarationNode[] })[]
+  relations: ReferenceEvidence[]
+  relationIndexCreatedAt: string
+  relationIndexBytes: number
+  lspQueries: number
   fragments: (SourceChunk & { text: string })[]
 }
 
@@ -27,11 +33,16 @@ export async function searchSemanticContext(fs: FileSystem, input: SemanticIndex
   const query = args.query?.trim(), path = relativePath(args.path ?? '.'), limit = args.limit ?? 4
   if (!query || query.length > 1000 || /\0/.test(query)) throw new Error('query must contain 1–1000 characters')
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
-  const location = await snapshotLocation(fs, exec), { snapshot, bytes } = await loadSnapshot(fs, config, location)
+  if (args.expand_relations !== undefined && typeof args.expand_relations !== 'boolean') throw new Error('expand_relations must be boolean')
+  if (args.expand_relations === true && !config.relations) throw new Error('relations are not configured; the operator must configure and prepare them first')
+  const location = await snapshotLocation(fs, exec), { snapshot, bytes, info } = await loadSnapshot(fs, config, location)
+  const expanded = config.relations && args.expand_relations !== false
+    ? await loadRelations(fs, config, location, snapshot, info.version) : undefined
   const candidates = snapshot.chunks.filter(chunk => path === '.' || chunk.path === path || chunk.path.startsWith(path + '/'))
   const result: SemanticContextResult = { indexCreatedAt: snapshot.createdAt, embeddingId: snapshot.embedding.id,
     candidateChunks: candidates.length, documentEmbeddings: 0, queryEmbeddings: 0, elapsedMs: 0,
-    embeddingMs: 0, indexBytes: bytes, truncated: !!snapshot.omissions.length, limits: [...snapshot.omissions], hits: [], fragments: [] }
+    embeddingMs: 0, indexBytes: bytes, truncated: !!snapshot.omissions.length, limits: [...snapshot.omissions], hits: [], fragments: [], relations: [],
+    relationIndexCreatedAt: expanded?.relations.createdAt ?? '', relationIndexBytes: expanded?.bytes ?? 0, lspQueries: 0 }
   if (candidates.length) {
     const before = performance.now()
     const [vector] = normalizeVectors(await config.embedding.embed([query], 'query', location.signal), 1, config.embedding.dimensions)
@@ -41,9 +52,49 @@ export async function searchSemanticContext(fs: FileSystem, input: SemanticIndex
       .sort((a, b) => b.score - a.score || (a.chunk.path < b.chunk.path ? -1 : a.chunk.path > b.chunk.path ? 1 : 0)
         || a.chunk.startLine - b.chunk.startLine)
     const files = new Map(snapshot.files.map(file => [file.path, file]))
+    const selected = scored.slice(0, limit)
     const covered = new Map<string, Set<number>>()
     let textBytes = 0
-    for (const { chunk, score } of scored.slice(0, limit)) {
+    function appendSource(part: SourceChunk, budget: number): void {
+      const file = files.get(part.path)!, seen = covered.get(part.path) ?? new Set<number>()
+      covered.set(part.path, seen)
+      let start = part.startLine
+      while (start <= part.endLine) {
+        if (seen.has(start)) { start++; continue }
+        let end = start
+        while (end < part.endLine && !seen.has(end + 1)) end++
+        const range = { path: part.path, startLine: start, endLine: end }
+        const text = chunkText(range, file.source), size = encoder.encode(text).byteLength
+        if (textBytes + size <= budget) {
+          result.fragments.push({ ...range, text }); textBytes += size
+          for (let line = start; line <= end; line++) seen.add(line)
+        } else result.limits.push(`${part.path}:${start}-${end}: source omitted by shared budget`)
+        start = end + 1
+      }
+    }
+    if (expanded) {
+      let mappingBytes = 0
+      const seen = new Set<string>()
+      for (const anchor of expanded.relations.anchors) {
+        if (!selected.some(({ chunk }) => chunk.path === anchor.anchor.path
+          && chunk.startLine <= anchor.anchor.line && chunk.endLine >= anchor.anchor.line)) continue
+        result.limits.push(`${anchor.targetId}: anchored LSP references only; exclusions ${JSON.stringify(anchor.excluded)}; no complete call graph or unique overload target`)
+        for (const ref of anchor.references) {
+          if (path !== '.' && ref.path !== path && !ref.path.startsWith(path + '/')) continue
+          const key = `${ref.targetId}:${ref.path}:${ref.line}:${ref.character}`
+          if (seen.has(key)) continue
+          seen.add(key)
+          const size = encoder.encode(JSON.stringify(ref)).byteLength
+          if (result.relations.length >= 8 || mappingBytes + size > 2048) {
+            result.limits.push('additional one-hop references omitted by 8-edge / 2 KiB mapping budget'); break
+          }
+          result.relations.push(ref); mappingBytes += size
+          const lines = files.get(ref.path)!.source.split('\n').length
+          appendSource({ path: ref.path, startLine: Math.max(1, ref.line - 3), endLine: Math.min(lines, ref.line + 3) }, 3072)
+        }
+      }
+    }
+    for (const { chunk, score } of selected) {
       location.signal.throwIfAborted()
       const file = files.get(chunk.path)!
       const declarations = file.declarations.filter(node => node.startLine <= chunk.endLine && node.endLine >= chunk.startLine)
@@ -55,26 +106,12 @@ export async function searchSemanticContext(fs: FileSystem, input: SemanticIndex
       if (declarations.length > result.hits[result.hits.length - 1].declarations.length) {
         result.limits.push(`${chunk.path}:${chunk.startLine}-${chunk.endLine}: AST metadata limited to 4 bounded names`)
       }
-      const seen = covered.get(chunk.path) ?? new Set<number>()
-      covered.set(chunk.path, seen)
-      let start = chunk.startLine
-      while (start <= chunk.endLine) {
-        if (seen.has(start)) { start++; continue }
-        let end = start
-        while (end < chunk.endLine && !seen.has(end + 1)) end++
-        const part = { path: chunk.path, startLine: start, endLine: end }
-        const text = chunkText(part, file.source), size = encoder.encode(text).byteLength
-        if (textBytes + size <= 8192) {
-          result.fragments.push({ ...part, text }); textBytes += size
-          for (let line = start; line <= end; line++) seen.add(line)
-        } else result.limits.push(`${part.path}:${start}-${end}: source omitted by 8 KiB budget`)
-        start = end + 1
-      }
-      // A ranked hit can be entirely covered by a higher hit; its mapping is retained.
+      appendSource(chunk, 8192)
     }
     if (scored.length > limit) result.limits.push(`top-${limit} candidates only; ${scored.length - limit} lower-ranked chunks not returned`)
   }
   await verifySnapshot(fs, location, snapshot)
+  if (expanded) await verifyRelations(fs, location, expanded.relations)
   result.truncated = result.limits.length > 0
   result.elapsedMs = performance.now() - started
   return result

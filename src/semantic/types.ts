@@ -8,10 +8,19 @@ export interface LocalEmbedding {
     Promise<readonly (readonly number[])[]>
 }
 
+export interface RelationAnchor { path: string; line: number; character: number }
+export interface SemanticRelationsConfig {
+  /** 操作者标识实际 LSP 工具链/配置；并非由宿主返回的 provider 身份。 */
+  lspId: string
+  environmentFiles: readonly string[]
+  anchors: readonly RelationAnchor[]
+}
+
 export interface SemanticIndexConfig {
   /** 固定的工作区相对 TS/JS 文件集合，不进行 glob 或全仓发现。 */
   files: readonly string[]
   embedding: LocalEmbedding
+  relations?: SemanticRelationsConfig
 }
 
 export interface IndexExecution { cwd: string; signal?: AbortSignal }
@@ -64,6 +73,26 @@ export function resolveConfig(config: SemanticIndexConfig): SemanticIndexConfig 
     || embedding.dimensions < 1 || embedding.dimensions > 4096 || typeof embedding.embed !== 'function') {
     throw new Error('a local embedding id, dimensions (1–4096) and embed function are required')
   }
-  return { files: Object.freeze(files), embedding: Object.freeze({ id: embedding.id,
+  let relations: SemanticRelationsConfig | undefined
+  if (config.relations) {
+    const r = config.relations
+    if (typeof r.lspId !== 'string' || !r.lspId.trim() || encoder.encode(r.lspId).byteLength > 256
+      || /[\0\r\n]/.test(r.lspId) || !Array.isArray(r.anchors) || r.anchors.length < 1 || r.anchors.length > 8
+      || !Array.isArray(r.environmentFiles) || r.environmentFiles.length < 1 || r.environmentFiles.length > 16) {
+      throw new Error('relations require lspId, 1–8 declaration anchors and 1–16 environment files')
+    }
+    const anchors = r.anchors.map(anchor => {
+      const path = relativePath(anchor.path)
+      if (!files.includes(path) || !Number.isSafeInteger(anchor.line) || anchor.line < 1
+        || !Number.isSafeInteger(anchor.character) || anchor.character < 1) throw new Error('relation anchors require exact prepared declaration coordinates')
+      return Object.freeze({ path, line: anchor.line, character: anchor.character })
+    }).sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.character - b.character)
+    const environmentFiles = r.environmentFiles.map(relativePath).sort()
+    if (new Set(anchors.map(a => JSON.stringify(a))).size !== anchors.length
+      || new Set(environmentFiles).size !== environmentFiles.length
+      || environmentFiles.some(path => path === '.' || path.startsWith('.code-intelligence/'))) throw new Error('duplicate anchors or invalid environment files')
+    relations = Object.freeze({ lspId: r.lspId, anchors: Object.freeze(anchors), environmentFiles: Object.freeze(environmentFiles) })
+  }
+  return { relations, files: Object.freeze(files), embedding: Object.freeze({ id: embedding.id,
     dimensions: embedding.dimensions, embed: embedding.embed.bind(embedding) }) }
 }
