@@ -222,7 +222,7 @@ const output: GeneratedOverview = {
 
 准备结果区分created/rebuilt/reused，报告本次回调数、JSON输入/输出字节、reported Token/requests及未知回调数，`storedCosts`保留原构建记录；暖复用与查询本次回调0。字节不等于Token，适配器添加的prompt/transport成本须自行准确报告。失败/取消不发布半成品，已花请求成本不能因未返回准备结果而丢弃；适配器须自行记账并响应取消。准备有120秒组合取消，但插件不能强制终止忽略signal的外部工作。不内置生成模型、下载、网络客户端或外部实验预算。
 
-已用受控生成器验证真实Harness FS/工具的生命周期，尚未验证真实LLM摘要质量、维护成本或完整Agent收益。`overviews`不配置时不注册工具或触发生成。
+已完成受控生命周期验证及一次真实模型的四节点生成/跨进程暖复用（2026-10-16，DeepSeek Flash/high，输出上限16384）；源码审计仍发现引文不足，真实摘要质量、维护成本和完整Agent收益尚未通过验收。`overviews`不配置时不注册工具或触发生成。
 
 ### `ci_batch_definitions`：前置批量定义导航
 
