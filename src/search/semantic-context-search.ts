@@ -3,6 +3,7 @@ import type { DeclarationNode } from '../ast/typescript-declarations.js'
 import { chunkText, normalizeVectors } from '../semantic/chunks.js'
 import { loadSnapshot, snapshotLocation, verifySnapshot } from '../semantic/snapshot.js'
 import { loadRelations, verifyRelations } from '../semantic/relations.js'
+import { selectSemanticReferences } from './semantic-reference-selection.js'
 import type { ReferenceEvidence } from '../semantic/relations.js'
 import { encoder, relativePath, resolveConfig } from '../semantic/types.js'
 import type { IndexExecution, SemanticIndexConfig, SourceChunk } from '../semantic/types.js'
@@ -73,25 +74,12 @@ export async function searchSemanticContext(fs: FileSystem, input: SemanticIndex
       }
     }
     if (expanded) {
-      let mappingBytes = 0
-      const seen = new Set<string>()
-      for (const anchor of expanded.relations.anchors) {
-        if (!selected.some(({ chunk }) => chunk.path === anchor.anchor.path
-          && chunk.startLine <= anchor.anchor.line && chunk.endLine >= anchor.anchor.line)) continue
-        result.limits.push(`${anchor.targetId}: anchored LSP references only; exclusions ${JSON.stringify(anchor.excluded)}; no complete call graph or unique overload target`)
-        for (const ref of anchor.references) {
-          if (path !== '.' && ref.path !== path && !ref.path.startsWith(path + '/')) continue
-          const key = `${ref.targetId}:${ref.path}:${ref.line}:${ref.character}`
-          if (seen.has(key)) continue
-          seen.add(key)
-          const size = encoder.encode(JSON.stringify(ref)).byteLength
-          if (result.relations.length >= 8 || mappingBytes + size > 2048) {
-            result.limits.push('additional one-hop references omitted by 8-edge / 2 KiB mapping budget'); break
-          }
-          result.relations.push(ref); mappingBytes += size
-          const lines = files.get(ref.path)!.source.split('\n').length
-          appendSource({ path: ref.path, startLine: Math.max(1, ref.line - 3), endLine: Math.min(lines, ref.line + 3) }, 3072)
-        }
+      const selection = selectSemanticReferences(expanded.relations, selected.map(item => item.chunk), path)
+      result.relations = selection.references
+      result.limits.push(...selection.limits)
+      for (const ref of result.relations) {
+        const lines = files.get(ref.path)!.source.split('\n').length
+        appendSource({ path: ref.path, startLine: Math.max(1, ref.line - 3), endLine: Math.min(lines, ref.line + 3) }, 3072)
       }
     }
     for (const { chunk, score } of selected) {

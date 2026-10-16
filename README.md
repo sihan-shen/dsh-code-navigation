@@ -146,7 +146,7 @@ await ctx.plugin(codeIntelligence, { semanticIndex })
 
 关系单独存入 `.code-intelligence/semantic-relations.json`（最多512KiB），绑定向量快照的宿主版本及所有源码版本，并记录1–16个显式环境文件的 canonical identity/版本。`lspId` 由操作者标识实际 provider、工具链与配置，宿主未返回 provider 身份供验证；环境文件不是完整依赖闭包，未列入的配置、依赖和工具链变化须更新 ID 并显式重建。索引重建、环境文件/关系配置变化后调用 `prepareSemanticRelations(..., { cwd, rebuild: true })`，缺失/损坏/过期不自动修复或回退。
 
-配置后查询默认扩展：只从原向量排名块中出现声明名称位置的锚点取入向引用，最多一跳、8条/2KiB映射，`path` 同时约束种子与引用来源。返回 `relations` 的源/目标坐标与版本、语法角色及容器，`relationIndexCreatedAt/relationIndexBytes/lspQueries` 说明复用情况。扩展源码先占最多3KiB，种子源码使用剩余预算；总源码仍8KiB、渲染仍10KiB，可能挤出种子证据，所有省略会标记。`expand_relations: false` 保留相同向量种子的不扩展对照，也可在关系快照暂时不可用时明确选择它。没有递归、自动全仓建图、查询缓存或运行时调用图。
+配置后查询默认扩展：只从原向量排名块中出现声明名称位置的锚点取入向引用，最多一跳、8条/2KiB映射，`path` 同时约束种子与引用来源。锚点按最早命中种子的排名轮转，每轮最多选一条可容纳引用；锚点内优先种子未出现的文件，再选同文件未覆盖位置，最后选已覆盖位置，路径/行/列稳定排序。较大记录放不下时跳过并继续尝试其他记录；预算仍可能省略锚点或使用点，这个启发式不保证问题相关性。返回 `relations` 的源/目标坐标与版本、语法角色及容器，`relationIndexCreatedAt/relationIndexBytes/lspQueries` 说明复用情况。扩展源码先占最多3KiB，种子源码使用剩余预算；总源码仍8KiB、渲染仍10KiB，可能挤出种子证据，所有省略会标记。`expand_relations: false` 保留相同向量种子的不扩展对照，也可在关系快照暂时不可用时明确选择它。没有递归、自动全仓建图、查询缓存或运行时调用图。
 
 ### `ci_find_references`：已知声明的引用
 
