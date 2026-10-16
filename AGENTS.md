@@ -48,6 +48,8 @@
 
 ## 当前能力边界与评测记录
 
+- 概览节点参数枚举实际配置ID，描述附有界id/label/代表路径及真实默认根示例；JSON编码超过256B的代表路径明确省略，不显示无法使用的截断路径，最多8节点的提示小于6KiB。复用目标RC公开enum校验，非法模型调用先由宿主列合法ID；查询层未知节点错误另附目录与示例。不自动别名匹配，不常驻注入完整目录或摘要；该接口修补本身不代表Agent采用或收益已验证。
+
 - `ci_find_declarations` 默认注册，可通过 `enableFindDeclarations: false` 关闭；`enableCodeContext`、`enableDeclarationReferences`、`enablePrecedingLsp`、`enableToolCooperationPrompt` 全部默认关闭。可选 LSP 工具通过宿主服务动态注入；缺服务不注册，缺 provider 如实报错。提示按 Session 中实际可见工具生成，隐藏工具不留下调用指导。
 - 词法 RAG 位于 `src/tools/search-context.ts`、`src/search/code-context-search.ts`：宿主字面 grep 加有界源码与语法上下文，不是向量、图或树检索。旧离线向量实验不代表运行时能力。
 - 可选固定文件语义检索位于 `src/tools/semantic-context.ts`、`src/search/semantic-context-search.ts` 和 `src/semantic/`。`semanticIndex` 未配置时不注册；同包 `semantic-index` 子入口显式准备 `.code-intelligence/semantic-index.json`，主入口仍仅 name/inject/apply。复用 Harness FS 的 canonical identity、opaque version、有界读取和 guarded atomic write；不做哈希。固定范围/模型身份/解析版本/源码变化须显式整体重建，查询不做文档 embedding；没有查询缓存、自动发现或增量更新。AST 为支持的直接命名声明与最近支持父声明的语法元数据，不推断调用/引用关系。收益尚未通过真实模型或完整 Agent 对照验收。

@@ -3,7 +3,7 @@ import { chunkText, sourceChunks } from '../semantic/chunks.js'
 import { loadSnapshot, snapshotLocation } from '../semantic/snapshot.js'
 import { loadOverviews, overviewCosts, verifyOverviewBase } from '../semantic/overviews.js'
 import { resolveOverviewSetup } from '../semantic/overview-types.js'
-import type { OverviewCitation } from '../semantic/overview-types.js'
+import type { OverviewCitation, OverviewSetup } from '../semantic/overview-types.js'
 import { encoder } from '../semantic/types.js'
 import type { IndexExecution, SemanticIndexConfig, SourceChunk } from '../semantic/types.js'
 
@@ -24,13 +24,20 @@ export interface CodeOverviewResult {
   limits: string[]
 }
 
+export function overviewNodeHint(setup: OverviewSetup): string {
+  const catalog = setup.nodes.map(node => ({ id: node.id, label: node.label,
+    ...(encoder.encode(JSON.stringify(node.files[0])).byteLength <= 256
+      ? { path: node.files[0] } : { pathOmitted: true }) }))
+  return `Configured nodes: ${JSON.stringify(catalog)}. Default: ${JSON.stringify(setup.rootId)}. Example: ci_get_code_overview(${JSON.stringify({ node: setup.rootId })}).`
+}
+
 export async function getCodeOverview(fs: FileSystem, input: SemanticIndexConfig,
   args: CodeOverviewQuery, exec: IndexExecution): Promise<CodeOverviewResult> {
   const setup = resolveOverviewSetup(input), view = args.view ?? 'summary', id = args.node ?? setup.rootId
   if (view !== 'summary' && view !== 'source') throw new Error('overview view must be summary or source')
   if (typeof id !== 'string') throw new Error('overview node must be a configured id')
   const node = setup.nodes.find(node => node.id === id)
-  if (!node) throw new Error('unknown overview node; omit node to retrieve the root and configured catalog')
+  if (!node) throw new Error(`unknown overview node. ${overviewNodeHint(setup)}`)
   const location = await snapshotLocation(fs, exec), { snapshot, info } = await loadSnapshot(fs, setup.semantic, location)
   const result: CodeOverviewResult = { nodeId: id, label: node.label, view, sourceFiles: node.files.length,
     snapshotCreatedAt: snapshot.createdAt, overviewCreatedAt: '', generatorId: setup.generator.id, generationCalls: 0,

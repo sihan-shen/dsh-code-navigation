@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { getCodeOverview } from '../search/code-overview.js'
+import { getCodeOverview, overviewNodeHint } from '../search/code-overview.js'
 import type { CodeOverviewResult } from '../search/code-overview.js'
 import { resolveOverviewSetup } from '../semantic/overview-types.js'
 import { encoder } from '../semantic/types.js'
@@ -33,6 +33,7 @@ export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfi
   const nodes = setup.nodes.map(node => Object.freeze({ id: node.id, label: node.label,
     ...(node.children.length ? { children: node.children } : { files: node.files }) }))
   const config = { ...setup.semantic, overviews: Object.freeze({ generator: setup.generator, nodes: Object.freeze(nodes) }) }
+  const nodeIds = setup.nodes.map(node => node.id), nodeHint = overviewNodeHint(setup)
   ctx.inject(['systemPrompt'], scoped => {
     scoped.systemPrompt.section({ name: 'tool:ci_get_code_overview', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 3,
       text: ({ scope }) => scoped.tools.get('ci_get_code_overview', scope) === undefined ? ''
@@ -46,7 +47,7 @@ export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfi
     reportedRequests: uint, unknownTokenCalls: uint, unknownRequestCalls: uint }
   ctx.tools.register(defineTool({ name: 'ci_get_code_overview',
     description: 'Read an explicitly prepared subsystem overview and source citations. Use for overall responsibilities and where to inspect, not exact conditions or binding claims. No query-time model, embedding or LSP calls. Omit node for root and catalog. view:source reads bounded raw source without requiring summaries; it samples from file starts and can omit behavior. Missing/stale summary requires operator prepareSemanticOverviews (rebuild:true after changes); do not retry unchanged calls.',
-    parameters: { node: { ...string, description: 'Configured node id from the catalog; default root.' },
+    parameters: { node: { ...string, enum: nodeIds, description: `Exact configured node id. ${nodeHint}` },
       view: { ...string, enum: ['summary', 'source'], description: 'Default summary; source returns a bounded raw view of the same node file set.' } },
     output: { schema: { type: 'object', additionalProperties: false, properties: {
       nodeId: text, label: text, view: { ...text, enum: ['summary', 'source'] }, snapshotCreatedAt: text,

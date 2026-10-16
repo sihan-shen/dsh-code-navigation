@@ -165,6 +165,8 @@ await ctx.plugin(codeIntelligence, { semanticIndex })
 
 适用于整体职责、边界和下一步检查区域；省略`node`返回根概览及节点目录。`view: "source"`提供同节点文件集合的有界原文，不要求摘要先生成。查询不调用生成器、embedding或LSP；摘要声明附源码范围，坐标合法不代表语义正确或证据完整，精确条件、异常及绑定仍需引用原文/适用语言工具。
 
+`node`参数枚举当前配置的合法ID，描述附节点标签、代表路径及实际默认根的调用示例；代表路径过长时明确省略。非法ID由宿主参数校验返回合法值，查询层也提供候选与示例；不会自动将目录名或相似名称映射到某个节点。目录提示总量有界，不读取源码或触发生成。
+
 ```ts
 import type { Context } from '@deepseek-ai/cordis'
 import * as codeIntelligence from '/absolute/path/to/dsh-code-intelligence-new/dist/index.js'
