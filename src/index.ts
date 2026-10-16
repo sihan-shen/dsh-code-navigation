@@ -5,6 +5,7 @@ import { registerFindDeclarationsTool } from './tools/find-declarations.js'
 import { registerSearchContextTool } from './tools/search-context.js'
 import { registerSemanticContextTool } from './tools/semantic-context.js'
 import { registerToolCooperationPrompt } from './tools/tool-cooperation.js'
+import { registerCodeOverviewTool } from './tools/code-overview.js'
 import type { SemanticIndexConfig } from './semantic/types.js'
 
 export const name = 'code-intelligence'
@@ -25,6 +26,7 @@ export function apply(ctx: Context, config: {
   if (config.enableToolCooperationPrompt === true) registerToolCooperationPrompt(ctx)
   if (config.enableCodeContext === true) registerSearchContextTool(ctx)
   if (config.semanticIndex) registerSemanticContextTool(ctx, config.semanticIndex)
+  if (config.semanticIndex?.overviews) registerCodeOverviewTool(ctx, config.semanticIndex)
   if (config.enablePrecedingLsp === true) {
     ctx.inject(['lsp'], scoped => registerBatchDefinitionsTool(scoped))
   }

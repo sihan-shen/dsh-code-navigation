@@ -3,3 +3,6 @@ export type { PreparationResult } from './snapshot.js'
 export type { LocalEmbedding, SemanticIndexConfig, IndexExecution } from './types.js'
 export { prepareSemanticRelations } from './relations.js'
 export type { RelationAnchor, SemanticRelationsConfig } from './types.js'
+export { prepareSemanticOverviews } from './overviews.js'
+export type { OverviewGenerator, OverviewRequest, GeneratedOverview, OverviewUsage,
+  OverviewCitation, OverviewClaim, OverviewNode, SemanticOverviewsConfig } from './overview-types.js'

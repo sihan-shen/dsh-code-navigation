@@ -1,4 +1,5 @@
 import type { DeclarationNode } from '../ast/typescript-declarations.js'
+import type { SemanticOverviewsConfig } from './overview-types.js'
 
 /** id 必须包括模型修订、pooling、预处理与 query/document 指令版本。 */
 export interface LocalEmbedding {
@@ -21,6 +22,7 @@ export interface SemanticIndexConfig {
   files: readonly string[]
   embedding: LocalEmbedding
   relations?: SemanticRelationsConfig
+  overviews?: SemanticOverviewsConfig
 }
 
 export interface IndexExecution { cwd: string; signal?: AbortSignal }

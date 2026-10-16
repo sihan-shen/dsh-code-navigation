@@ -1,6 +1,6 @@
 # dsh-code-intelligence
 
-DeepSeek Harness 的单包代码检索插件：默认提供 AST 声明定位，可按需启用词法源码检索、固定文件语义检索、声明引用查询和前置批量 LSP 定义导航。目标是让 Agent 用较少的重复阅读获取足够证据；目前尚未证明稳定降低总 Token 消耗。
+DeepSeek Harness 的单包代码检索插件：默认提供 AST 声明定位，可按需启用词法源码检索、固定文件语义检索、子系统概览摘要、声明引用查询和前置批量 LSP 定义导航。目标是让 Agent 用较少的重复阅读获取足够证据；目前尚未证明稳定降低总 Token 消耗。
 
 2026-10-14的新仓库对照（4仓库、8题、两组各重复2次）中，前置LSP插件总Token比原生read/grep/glob/lsp高5.5%；正常入口子组低19.2%，超出64 KiB入口限制的子组高69.2%。较少阅读没有转化为整体成本下降，前置LSP仍默认关闭。
 
@@ -41,6 +41,7 @@ await ctx.plugin(codeIntelligence, {
 | `enablePrecedingLsp` | `false` | 有宿主 LSP 服务时注册 `ci_batch_definitions`，并提供前置导航指导 |
 | `enableToolCooperationPrompt` | `false` | 注入按实际可见工具生成的协同使用指导 |
 | `semanticIndex` | 未配置 | 注册 `ci_search_semantic_context`；须显式准备固定文件索引并提供本地 embedding 函数 |
+| `semanticIndex.overviews` | 未配置 | 额外注册 `ci_get_code_overview`；显式分组、生成接口及摘要准备，查询不调用模型 |
 
 `ci_find_declarations` 默认注册，`enableFindDeclarations: false` 可关闭；前置LSP的内部语法解析不依赖该声明工具。前置 LSP 自身的指导段不依赖 `enableToolCooperationPrompt`。没有 LSP 服务时不会注册两个 LSP 扩展工具；有服务但没有匹配 provider 时如实返回错误。
 
@@ -118,7 +119,7 @@ interface LocalEmbedding {
 
 缺索引时，工具要求操作者运行准备 API。文件改动、删除/改名、固定范围、模型 ID/维度或 TypeScript/快照格式变化后，拒绝复用，须显式调用 `prepareSemanticIndex(ctx.fs, semanticIndex, { cwd, rebuild: true })` 整体重建；查询不自动更新、不悄悄回退词法。源码变化依据宿主的文件版本与 canonical identity；没有哈希检查，前后版本复核也不是原子仓库快照。不同工作区/worktree 不共享索引，缓存目录/文件不接受符号链接，源码别名须仍处于工作区内。
 
-固定本地 Qwen3-Embedding-0.6B 的一次开发语料验证已完成：8文件55块，三题必要可见事实向量5/6、带人工实现词的词法6/6，未证明通用召回或完整 Agent Token 收益。默认配置不启用语义检索；没有摘要树或增量更新。
+固定本地 Qwen3-Embedding-0.6B 的一次开发语料验证已完成：8文件55块，三题必要可见事实向量5/6、带人工实现词的词法6/6，未证明通用召回或完整 Agent Token 收益。默认配置不启用语义检索；没有自动聚类或增量更新。显式概览层级见下节。
 
 
 ### 可选的持久一跳引用
@@ -155,6 +156,73 @@ await ctx.plugin(codeIntelligence, { semanticIndex })
 ```
 
 仅支持已知工作区相对 `.ts` 文件中的精确声明名。唯一声明触发一次宿主引用查询；重名时只返回候选，不猜选。结果包含声明、精确引用范围及有界源码，不代表调用层级。路径未知时先定位声明；其他使用点导航可用原生 `lsp`。
+
+### `ci_get_code_overview`：显式子系统概览
+
+```json
+{"node": "request", "view": "summary"}
+```
+
+适用于整体职责、边界和下一步检查区域；省略`node`返回根概览及节点目录。`view: "source"`提供同节点文件集合的有界原文，不要求摘要先生成。查询不调用生成器、embedding或LSP；摘要声明附源码范围，坐标合法不代表语义正确或证据完整，精确条件、异常及绑定仍需引用原文/适用语言工具。
+
+```ts
+import type { Context } from '@deepseek-ai/cordis'
+import * as codeIntelligence from '/absolute/path/to/dsh-code-intelligence-new/dist/index.js'
+import {
+  prepareSemanticIndex, prepareSemanticOverviews,
+  type LocalEmbedding, type OverviewGenerator, type SemanticIndexConfig,
+} from 'dsh-code-intelligence/semantic-index'
+
+async function attachOverviews(ctx: Context, cwd: string,
+  embedding: LocalEmbedding, generator: OverviewGenerator) {
+  const semanticIndex: SemanticIndexConfig = {
+    files: ['src/session.ts', 'src/request.ts'],
+    embedding,
+    overviews: {
+      generator,
+      nodes: [
+        { id: 'root', label: '会话与请求概览', children: ['session', 'request'] },
+        { id: 'session', label: '会话', files: ['src/session.ts'] },
+        { id: 'request', label: '请求生命周期', files: ['src/request.ts'] },
+      ],
+    },
+  }
+  await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+  const preparation = await prepareSemanticOverviews(ctx.fs, semanticIndex, { cwd })
+  await ctx.plugin(codeIntelligence, { semanticIndex })
+  return preparation
+}
+```
+
+生成接口来自同包子入口：
+
+```ts
+import type { OverviewRequest, GeneratedOverview } from 'dsh-code-intelligence/semantic-index'
+
+interface OverviewGenerator {
+  id: string // 模型、提示、解码配置修订；语义变化须换id
+  generate(request: OverviewRequest, signal: AbortSignal): Promise<GeneratedOverview>
+}
+// request含profile/instruction/node，以及sources或children：
+// 叶sources为完整文件path/source；父children只含直接子节点摘要及出处。
+// GeneratedOverview示意，坐标必须对应本节点可用证据：
+const output: GeneratedOverview = {
+  claims: [{ text: '请求状态由该子系统维护。',
+    evidence: [{ path: 'src/request.ts', startLine: 10, endLine: 18 }] }],
+  limitations: ['摘要用于概览，具体取消条件需要回到源码。'],
+  usage: { totalTokens: null, requests: null }, // 实际数值或null，未知不当0
+}
+```
+
+适配器应把SDK返回值规范为上述字段，不原样返回包含额外字段的响应。每节点1次显式回调；1–6条声明，每条≤400 UTF-8字节、1–3段引文，每段≤12行；最多4条限制、每条≤200字节。叶引文须在该组完整原文内，父只能复用直接子摘要已有的精确引文，不能编造新坐标。位置与范围校验不能检测生成内容的事实错误，回调也不能把源码中的指令当作操作授权。
+
+配置是1–8节点、最多3层的单父有根树；叶`files`与父`children`互斥。叶可跨目录并交叉引用同一文件，根并集必须覆盖固定集。这里是操作者定义的概览层级，不是自动语义聚类/RAPTOR。每次回调的请求JSON≤64KiB，输入完整、不静默截断；超限须收窄固定集/分组，单个超限文件本轮不支持片段摘要。查询原文视图按各文件开头的连续块轮转，最多8KiB/96行，所有缺口明确；它不是按问题优化的检索基线。两视图渲染≤10KiB，声明与引文作为整体保留或省略。
+
+摘要保存在`.code-intelligence/semantic-overviews.json`，最多256KiB；复用基础快照身份、宿主版本、生成器id和规范分组。首次基础向量准备的成本仍存在，不是独立纯摘要部署。变更原文须先显式重建基础索引，再`prepareSemanticOverviews(..., { cwd, rebuild: true })`；仅改分组/生成器id也要求显式重建摘要。查询拒绝缺失/损坏/过期摘要，不自动生成；source视图只依赖有效基础快照。准备/查询前后复核版本、拒绝缓存链接、使用宿主版本守卫原子写，不是原子仓库快照或哈希校验。
+
+准备结果区分created/rebuilt/reused，报告本次回调数、JSON输入/输出字节、reported Token/requests及未知回调数，`storedCosts`保留原构建记录；暖复用与查询本次回调0。字节不等于Token，适配器添加的prompt/transport成本须自行准确报告。失败/取消不发布半成品，已花请求成本不能因未返回准备结果而丢弃；适配器须自行记账并响应取消。准备有120秒组合取消，但插件不能强制终止忽略signal的外部工作。不内置生成模型、下载、网络客户端或外部实验预算。
+
+已用受控生成器验证真实Harness FS/工具的生命周期，尚未验证真实LLM摘要质量、维护成本或完整Agent收益。`overviews`不配置时不注册工具或触发生成。
 
 ### `ci_batch_definitions`：前置批量定义导航
 
