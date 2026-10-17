@@ -1,6 +1,6 @@
 # dsh-code-intelligence
 
-DeepSeek Harness 的单包代码检索插件，默认提供 AST 声明定位，可按需启用词法 RAG（源码上下文检索）、声明引用查询和批量 LSP 定义导航。
+DeepSeek Harness 的单包代码检索插件，默认提供 AST 声明定位，可按需启用词法 RAG（源码上下文检索）、固定文件语义检索、子系统概览、声明引用查询和批量 LSP 定义导航。
 
 ## 项目架构
 
@@ -13,6 +13,7 @@ DeepSeek Harness 的单包代码检索插件，默认提供 AST 声明定位，�
 | `src/search/` | 候选发现、词法检索、工作区文件约束及结果整理 |
 | `src/ast/` | TypeScript/JavaScript 语法解析 |
 | `src/lsp/` | 宿主文件与 LSP 服务接入及有界导航 |
+| `src/semantic/` | 固定源码快照、向量、一跳引用和显式概览的准备与持久复用 |
 
 ## 构建与接入
 
@@ -43,6 +44,8 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | `enableDeclarationReferences` | `false` | 有宿主 LSP 服务时注册 `ci_find_references` |
 | `enablePrecedingLsp` | `false` | 有宿主 LSP 服务时注册 `ci_batch_definitions`，并提供前置导航指导 |
 | `enableToolCooperationPrompt` | `false` | 按实际可见工具生成协同使用指导 |
+| `semanticIndex` | 未配置 | 注册 `ci_search_semantic_context`；须提供本地 embedding 回调并显式准备固定文件索引 |
+| `semanticIndex.overviews` | 未配置 | 额外注册 `ci_get_code_overview`；须配置分组、生成回调并显式准备摘要 |
 
 ## 工具
 
@@ -52,6 +55,8 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段 | `terms`，可选 `path`、`limit` |
 | `ci_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用（含声明位置），附有界源码 | `file_path`、`name` |
 | `ci_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义，附有界源码及有限局部续查 | `queries`，每项提供 `file_path`、`line` 和 `symbol` 或 `character` |
+| `ci_search_semantic_context` | 在已准备的固定 TS/JS 文件集召回语义相近源码；可选一跳入向引用 | `query`，可选 `path`、`limit`、`expand_relations` |
+| `ci_get_code_overview` | 读取显式分组的概览摘要或有界源码 | 可选 `node`、`view`（`summary` / `source`） |
 
 批量导航的 `line` 从 1 开始，`symbol` 使用该行已见的精确标识符；也可改用从 1 开始的 UTF-16 列号 `character`，二者互斥。`queries` 中每项可设置 `definition_only: true`，只查询即时定义。按缺少的事实选择工具，已有源码或返回结果足以回答时即可作答。
 
@@ -67,6 +72,41 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 这里的**词法 RAG**是把检索到的源码片段作为 Agent 生成回答时的证据：召回使用字面匹配，AST 用于上下文组织和选择，检索工具本身不调用生成模型或向量模型。
 
 批量定义导航由 **AST 与 LSP 协作**：局部续查时，AST 从定义源码中选择唯一受支持的下一使用点，再交给宿主 LSP 查询其定义。AST 负责语法定位、上下文组织和续查位置选择，跨文件绑定由 LSP 解析。这里的内部 AST 解析不依赖 `ci_find_declarations` 是否注册。
+
+### 固定文件语义检索与概览准备
+
+通过包子入口 `dsh-code-intelligence/semantic-index` 显式准备，再传入同一配置加载插件。以下示例假定宿主 `ctx`、工作区绝对路径 `cwd` 和本地回调 `localEmbedding` 已提供：
+
+```ts
+import {
+  prepareSemanticIndex,
+  type SemanticIndexConfig,
+} from 'dsh-code-intelligence/semantic-index'
+
+const semanticIndex: SemanticIndexConfig = {
+  files: ['src/service.ts'], // 替换为明确的 TS/JS 文件集合
+  embedding: localEmbedding,
+}
+await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+await ctx.plugin(codeIntelligence, { semanticIndex })
+```
+
+`localEmbedding` 实现同入口导出的 `LocalEmbedding`：提供模型/预处理修订 `id`、向量 `dimensions` 和 `embed(texts, purpose, signal)`，按输入顺序返回有限非零向量；`purpose` 为 `document` 或 `query`。将取消信号传给后端。插件不内置模型下载或 embedding 网络客户端。
+
+需要概览时，在准备前为配置增加 `overviews`，提供 `OverviewGenerator` 生成回调和显式节点，例如：
+
+```ts
+semanticIndex.overviews = {
+  generator: overviewGenerator, // 已提供的 OverviewGenerator 实现
+  nodes: [{ id: 'service', label: '服务概览', files: ['src/service.ts'] }],
+}
+```
+
+先准备基础索引，再调用同子入口的 `prepareSemanticOverviews(ctx.fs, semanticIndex, { cwd })`，最后加载插件。查询时省略 `node` 使用配置根节点；`view: 'summary'` 读取摘要，`view: 'source'` 读取原文且不要求摘要已经生成。查询不调用生成器。
+
+需要持久一跳引用时，增加 `relations`（准确的 `lspId`、`environmentFiles` 和声明名称坐标 `anchors`），在基础索引准备后调用 `prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })`。构建需要宿主 LSP，查询不调用 LSP；`expand_relations: false` 可关闭查询中的引用扩展。
+
+准备结果持久化在各工作区的 `.code-intelligence/`，有效快照可跨进程复用。源码、固定范围、模型身份、生成器或分组变化后，按相应准备接口显式传入 `rebuild: true` 重建；不同工作区/worktree 的索引不可直接复用。完整配置类型见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
 
 ## 开发资料
 

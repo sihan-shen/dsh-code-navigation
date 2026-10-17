@@ -3,7 +3,10 @@ import { registerBatchDefinitionsTool } from './tools/batch-definitions.js'
 import { registerFindReferencesTool } from './tools/find-references.js'
 import { registerFindDeclarationsTool } from './tools/find-declarations.js'
 import { registerSearchContextTool } from './tools/search-context.js'
+import { registerSemanticContextTool } from './tools/semantic-context.js'
 import { registerToolCooperationPrompt } from './tools/tool-cooperation.js'
+import { registerCodeOverviewTool } from './tools/code-overview.js'
+import type { SemanticIndexConfig } from './semantic/types.js'
 
 export const name = 'code-intelligence'
 export const inject = ['tools', 'fs']
@@ -16,10 +19,14 @@ export function apply(ctx: Context, config: {
   enableDeclarationReferences?: boolean
   enableCodeContext?: boolean
   enableToolCooperationPrompt?: boolean
+  /** 显式准备的固定文件语义索引；未配置时不注册，不触发 embedding。 */
+  semanticIndex?: SemanticIndexConfig
 } = {}): void {
   if (config.enableFindDeclarations !== false) registerFindDeclarationsTool(ctx)
   if (config.enableToolCooperationPrompt === true) registerToolCooperationPrompt(ctx)
   if (config.enableCodeContext === true) registerSearchContextTool(ctx)
+  if (config.semanticIndex) registerSemanticContextTool(ctx, config.semanticIndex)
+  if (config.semanticIndex?.overviews) registerCodeOverviewTool(ctx, config.semanticIndex)
   if (config.enablePrecedingLsp === true) {
     ctx.inject(['lsp'], scoped => registerBatchDefinitionsTool(scoped))
   }
