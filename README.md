@@ -1,14 +1,22 @@
 # dsh-code-intelligence
 
-DeepSeek Harness 的单包代码检索插件：默认提供 AST 声明定位，可按需启用词法源码检索、声明引用查询和前置批量 LSP 定义导航。目标是让 Agent 用较少的重复阅读获取足够证据；目前尚未证明稳定降低总 Token 消耗。
+DeepSeek Harness 的单包代码检索插件，默认提供 AST 声明定位，可按需启用词法 RAG（源码上下文检索）、声明引用查询和批量 LSP 定义导航。
 
-2026-10-14的新仓库对照（4仓库、8题、两组各重复2次）中，前置LSP插件总Token比原生read/grep/glob/lsp高5.5%；正常入口子组低19.2%，超出64 KiB入口限制的子组高69.2%。较少阅读没有转化为整体成本下降，前置LSP仍默认关闭。
+## 项目架构
 
-上一次修正实验（三题四组各一次）中，仅错误恢复版比旧版少27.3%总Token，停止描述版比错误版贵2.0%，当时未保留到主描述。最新两候选分别与原生的18格复验中，停止指导版比原生少32.4%、比错误版少20.9%；两次都在同文件证据足够时直接答，跨文件题仍采用批量导航。已将停止指导版合回主插件，默认前置仍关闭。短导入目标题仍比原生贵6.3%，三题两次不能证明通用稳定收益。
+插件入口负责装配和注册工具，检索与导航复用宿主的文件、搜索及 LSP 服务，语言专属语法解析由 TypeScript 提供。
+
+| 模块 | 职责 |
+| --- | --- |
+| `src/index.ts` | 唯一插件入口，导出 `name`、`inject`、`apply` |
+| `src/tools/` | 模型可见的参数、输出、渲染和使用指导 |
+| `src/search/` | 候选发现、词法检索、工作区文件约束及结果整理 |
+| `src/ast/` | TypeScript/JavaScript 语法解析 |
+| `src/lsp/` | 宿主文件与 LSP 服务接入及有界导航 |
 
 ## 构建与接入
 
-当前包为私有本地项目，尚未发布到 npm。需要 Node.js、pnpm，以及已装配文件和工具服务的 Harness 宿主。
+当前为私有本地包。需要 Node.js、pnpm，以及已装配 `tools`、`fs` 服务的 Harness 宿主。依赖版本由 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml) 固定。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -16,128 +24,50 @@ pnpm typecheck
 pnpm build
 ```
 
-在宿主的 Cordis Context 上加载构建入口；下面的路径须替换为本机绝对路径：
+在宿主的 Cordis Context 上加载构建入口，替换为本机绝对路径，并按需传入下表配置：
 
 ```ts
 import * as codeIntelligence from '/absolute/path/to/dsh-code-intelligence-new/dist/index.js'
 
-await ctx.plugin(codeIntelligence, {
-  enablePrecedingLsp: true,
-  enableFindDeclarations: false, // 只调查使用点绑定时，减少无关声明工具协议
-})
+await ctx.plugin(codeIntelligence, {})
 ```
 
-宿主须先装配 `tools`、`fs` 服务。LSP 功能还需要宿主 `lsp` 服务和匹配的语言 provider；语言服务器的安装、配置及生命周期由宿主负责。插件不替换原生 `lsp` 工具，也不自行启动服务器。只有宿主提供 `systemPrompt` 服务时，相应指导段才会注入。
-
-截至 2026-10-13，本项目固定的接口基线为 `@deepseek-ai/cordis@4.0.4`，Harness 的 `dsh-fs`、`dsh-tools`、`dsh-lsp`、`dsh-system-prompt` 为 `0.2.0-rc.2`，运行时语法解析依赖 `typescript@6.0.3`。这是已验证的固定基线，不代表此刻上游最新版本；升级须重新核对公开接口。
+LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服务器的安装、配置和生命周期由宿主负责。使用指导通过宿主的可选 `systemPrompt` 服务注入。
 
 ## 配置
 
 | 配置 | 默认 | 作用 |
 | --- | --- | --- |
-| `enableFindDeclarations` | `true` | 注册 `ci_find_declarations`；只需入口使用点导航时可关闭 |
-| `enableCodeContext` | `false` | 注册 `ci_search_context`，词法检索并回传源码上下文 |
+| `enableFindDeclarations` | `true` | 注册 `ci_find_declarations` |
+| `enableCodeContext` | `false` | 注册词法 RAG 工具 `ci_search_context` |
 | `enableDeclarationReferences` | `false` | 有宿主 LSP 服务时注册 `ci_find_references` |
 | `enablePrecedingLsp` | `false` | 有宿主 LSP 服务时注册 `ci_batch_definitions`，并提供前置导航指导 |
-| `enableToolCooperationPrompt` | `false` | 注入按实际可见工具生成的协同使用指导 |
+| `enableToolCooperationPrompt` | `false` | 按实际可见工具生成协同使用指导 |
 
-`ci_find_declarations` 默认注册，`enableFindDeclarations: false` 可关闭；前置LSP的内部语法解析不依赖该声明工具。前置 LSP 自身的指导段不依赖 `enableToolCooperationPrompt`。没有 LSP 服务时不会注册两个 LSP 扩展工具；有服务但没有匹配 provider 时如实返回错误。
+## 工具
 
-## 工具与使用顺序
+| 工具 | 用途 | 主要输入 |
+| --- | --- | --- |
+| `ci_find_declarations` | 按精确名称查找 TS/JS 语法声明，返回种类、容器、名称坐标和名称所在行预览 | `names`，可选 `files` |
+| `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段 | `terms`，可选 `path`、`limit` |
+| `ci_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用（含声明位置），附有界源码 | `file_path`、`name` |
+| `ci_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义，附有界源码及有限局部续查 | `queries`，每项提供 `file_path`、`line` 和 `symbol` 或 `character` |
 
-按所缺证据选择可以替代常规 `read` 的工具：只缺已知名称的声明身份时用 AST；字面检索需要有界实现上下文时用词法源码检索；已见 `.ts` 使用点的静态绑定或短调用链未明时，用前置 LSP 替代候选目标文件阅读。返回的身份、映射和源码足够时直接作答，之后 `grep/read` 仅补未覆盖事实；不要先读目标，再调用这些工具确认。工具不要求每题全部调用。
+批量导航的 `line` 从 1 开始，`symbol` 使用该行已见的精确标识符；也可改用从 1 开始的 UTF-16 列号 `character`，二者互斥。`queries` 中每项可设置 `definition_only: true`，只查询即时定义。按缺少的事实选择工具，已有源码或返回结果足以回答时即可作答。
 
-### `ci_find_declarations`：声明身份与坐标
+### 实现方法
 
-```json
-{"names": ["createSession"], "files": ["src/session.ts"]}
-```
+| 工具 | 实现方法 |
+| --- | --- |
+| [ci_find_declarations](src/search/declaration-search.ts) | 读取指定候选文件；省略文件时先通过宿主字面 `grep` 发现候选。再用 TypeScript AST 筛选精确名称的语法声明，提取种类、容器、名称坐标和所在行预览。 |
+| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。随后按声明锚点、词覆盖及文件分散选择片段，去重、裁剪并返回编号源码。 |
+| [ci_find_references](src/lsp/declaration-references.ts) | 用 AST 定位已知文件内的唯一具名声明，再调用宿主 LSP 的 `findReferences`，按精确范围去重并附引用源码；短 import/export 语句由 AST 补齐上下文。 |
+| [ci_batch_definitions](src/lsp/batch-definitions.ts) | 用 AST 选择 `line + symbol` 对应的唯一标识符，或使用显式 UTF-16 列号，再调用宿主 LSP 的 `goToDefinition`；根据目标源码补充受支持的声明信息、成员/容器上下文和省略状态。 |
 
-支持 `.ts/.tsx/.js/.jsx`，一次 1–8 个精确名称、1–20 个明确文件。返回声明名称、文件、容器、语法种类和从 1 开始的 UTF-16 行列坐标。覆盖直接命名的函数、类、接口、类型别名、枚举、变量和方法；不覆盖解构名称、类属性和接口属性/方法签名。240 字符首行预览不是完整签名或推导类型。
+这里的**词法 RAG**是把检索到的源码片段作为 Agent 生成回答时的证据：召回使用字面匹配，AST 用于上下文组织和选择，检索工具本身不调用生成模型或向量模型。
 
-省略 `files` 时通过宿主字面 grep 发现候选，最多 20 个文件，引用和 import 也会进入候选。候选超限时不解析文件：根据返回线索确认路径后，使用原名称和明确 `files` 重试；不要重复同一个无范围查询。
-
-### `ci_search_context`：词法 RAG
-
-```json
-{"terms": ["createSession", "signal"], "path": "src", "limit": 4}
-```
-
-输入 1–6 个区分大小写的字面代码词，每词 2–64 字符，不接受正则或自动翻译自然语言。可指定工作区内路径；`limit` 为 1–6，默认 4。对 TS/JS 源码复用宿主 grep，读取匹配文件，再选择、合并和裁剪语法上下文；支持的函数、方法和特定变量初始化上下文会一起呈现，其他情况退回词法窗口或明确省略。
-
-每片最多 40 行、2 KiB，源码总量最多 8 KiB，渲染最多 10 KiB。返回编号源码、路径、关联上下文范围和截断/跳过信息。词法命中不证明语义关系或完整覆盖。
-
-当前产品没有向量检索、图 RAG、树索引、持久库或增量索引。既有本地向量实验不属于插件运行时能力。
-
-### `ci_find_references`：已知声明的引用
-
-```json
-{"file_path": "src/session.ts", "name": "createSession"}
-```
-
-仅支持已知工作区相对 `.ts` 文件中的精确声明名。唯一声明触发一次宿主引用查询；重名时只返回候选，不猜选。结果包含声明、精确引用范围及有界源码，不代表调用层级。路径未知时先定位声明；其他使用点导航可用原生 `lsp`。
-
-### `ci_batch_definitions`：前置批量定义导航
-
-```json
-{"queries": [{"file_path": "src/consumer.ts", "line": 18, "symbol": "createSession"}]}
-```
-
-示例仅展示参数格式，实际须取自已经看到的 `.ts` 引用标识符。优先提供 `line + symbol`，AST 只选择该行唯一精确标识符，忽略注释/字符串；零命中或重名返回未解决及有界候选，不猜列号。旧 `line + character` 仍支持，列从1开始按UTF-16计算；`symbol` 与 `character` 必须二选一。可用 `expected_symbol` 检查光标实际标识符，不匹配仅跳过该项，不移动光标或丢弃其他成功项。
-
-路径可为工作区内相对或绝对路径。已有源码足以证明所问身份、种类和位置时直接作答，包括简单同文件声明；不为额外确认而导航或hover。只有请求的绑定或短链事实仍未证，才以本工具替代目标read，一次提交1–8个已见引用。**入口中一个外层使用点就足够开始；不必先找齐所有角色的名称、目标文件或内部光标。** 对未证事实先提交入口已见锚点，让工具补内部使用点；1–8是容量，不是完整性要求。不要为收集四个角色而先read导入文件/基类/目标实现；同一规范路径的完全相同坐标去重。
-
-省略 `definition_only` 或设为 `false` 时，自动在真实定义目标中选择唯一受支持的局部语法关系，再通过宿主LSP确认下级绑定，最多两层、四个内部续查记录。支持调用参数回调内的 `new`、直接 `return this` 调用、构造器字段赋值右侧调用、局部数组初始化中的裸函数调用；类目标可选择唯一有体构造器。多个关系、调用位置或目标函数体时止步报告，不猜选。只需要当前即时定义时设置 `definition_only: true`；题目要求内部绑定时省略该字段。
-
-模型工具协议已移除 `follow` 参数：旧 `follow: []` 调用迁为 `definition_only: true`；旧显式选择器不再是模型参数。底层有界引擎未变；缺口允许在结果返回后用已见内部锚点继续查询，而不是在调用前先读齐目标。比如入口构造调用可返回构造器字段赋值中的调用，再返回对应字段体的数组裸调用；无需先打开目标文件取得这两个内部光标。
-
-超限错误`file_too_large`给出实际字节、上限及`retryable=false`；改写相对/绝对路径、光标或`definition_only`不能解决同文件超限。复用已有证据，只有事实仍未证才用可见原生LSP或有界grep/read。`source_budget_exhausted`表示调用内预算不足；非普通文件与无效大小分别报告，不再合并为含糊文件错误。工具没有自动回退或放宽上限。
-
-每输入最多 3 个目标；单文件读取最多 64 KiB、总读取 384 KiB；每目标普通窗口最多 17 行，可补充成员签名和容器头（每段最多 12 行）；整次最多 96 个唯一源码行，单行最多 240 字符，渲染最多 12,000 UTF-8 字节。调用内共享同文件版本的重叠源码，保留每个使用点到全部有界目标的映射。返回精确目标坐标、支持的语法元数据及编号源码；外部目标不读取，错误、空结果、省略和截断明确标记。`unknown` 表示没有匹配的受支持语法元数据，不表示没有定义。 批量工具额外识别精确位置上的 constructor、标识符名称的类方法/字段与接口方法/属性签名，并提供命名类或接口的必要容器头；这不扩大默认声明搜索工具的覆盖。共享证据块分别说明源码行预算和渲染缺口，完整的有界窗口不代表完整声明或行为。
-
-结果还提供光标处的 `sourceSymbol` 和语法角色 `sourceRole`（`declaration/reference/unknown`）；不支持的角色保持未知。目标 `relation=self` 表示同文件目标范围包含输入光标，`definition` 表示其他目标范围。`line/character` 保留服务器目标坐标，`declarationLine/declarationCharacter` 标明语法声明起点，避免把箭头初始化位置当字段声明起点。内部项带 `depth/parentQuery/rootIndex`，保留实际下级使用点映射和续查停止原因。声明点查询不能代替另一个使用点的绑定证明；语法分类不代表运行时关系。`kind=unknown` 仅是语法缺口，只在题目仍需要该事实且已有源码不足时补读。
-
-适用顺序是：读取入口→立刻提交已见外层锚点（内部角色尚未知也可调用）→批量LSP及内部续查替代目标 `read`→证据足够则作答。定位后允许 `grep` 或局部 `read` 补未解决绑定、不支持语法、截断或额外行为；不把定位工具作为读齐后的确认步骤。它是按证据缺口生成的软指导，产品不实施实验中的阅读阶段硬拒绝；宿主管理普通阅读和任务资源。没有跨调用缓存或阅读历史去重，源码版本复核也不构成原子LSP快照。
-
-## 已验证与限制
-
-2026-10-14按用户授权继续修改主插件：入口外层锚点立即导航指导、`definition_only`接口、精简渲染与可关闭声明AST已合入；默认前置LSP仍关闭。指导仍为软提示，无普通read拦截。动态预算分离属于宿主/评测接入，插件不自行管理任务预算。本轮类型检查/build、六成功本地场景17实际LSP、schema预拒绝/服务与配置降级通过；MT真实前后各一次，新版入口read→两入口根及两内部绑定→答案，无普通目标read。Token33283→14193（−57.4%）、请求5→3，两版所需身份/绑定均4/4，后端定义仍各4次；旧版有构造器附加措辞的严格失分。两组均隐藏声明AST、预算独立、无阅读顺序硬守卫。该单题组合结果尚不证明其他任务稳定采用或某句提示独立收益。
-
-前置LSP初版为提交 `f827943`。2026-10-14按用户授权合入行符号输入、精确声明起点及有界内部续查，工具指导在上述条件下替代常规read；`enablePrecedingLsp`仍默认关闭。调用内源码合并、工作区/版本/取消边界沿用，未加入额外依赖或自建语言服务器。
-
-较早行符号/续查版本合入已通过类型检查/build、真实官方Harness的输入/输出schema与渲染链路、两题八个使用点绑定；20个定向实际场景共52次宿主LSP查询覆盖两种输入、显式/关闭续查、重复项、不匹配/歧义及部分成功保留、混合输入预拒绝和取消，另核对注释/字符串排除及UTF-16列号。缺LSP服务不注册、有服务缺provider如实报错、隐藏工具不留下前置/协同提示均通过；未重复旧版全部版本变化/外部URI/渲染压力边界。
-
-合入前的同引擎前置方法实验为两已见题各一次：LSP/AST/文本分别31447/64635/30844Token、6/10/7请求，所需身份均8/8，LSP严格2/2。LSP均只读入口后一次批量续查即可作答，目标普通read和读后确认均0；相对文本继承题少12.6%、计时题多21.7%，合计多2.0%。文本计时题未用grep，Prompt和实验守卫也与自然采用不同，不能声称稳定成本收益；这些数字仅对应合入前冻结协议。
-
-随后当前产品描述/自身Prompt原样的KV/MT真实模型测试完成，两题都先read入口再用插件batch，无阅读顺序守卫，保留默认AST与宿主原生LSP可见。48026Token/7请求、所需身份8/8、严格2/2；KV自动内部续查后直接答，MT显式follow:[]关闭续查后整文件补读。未出现读后导航确认，但自动续查和目标阅读替代尚未稳定采用；没有同步对照，不从跨轮成本推断单独代码或提示收益。
-
-较早四格同题原生对照中，插件/原生分别69704/39733Token、9/8请求，所需实际绑定及身份均8/8，严格1/2、2/2。插件贵75.4%：KV仍先读齐后batch，返回68行全已读；MT避免目标普通read却手动三批导航，所有follow均[]，内部续查0。原生两题都在读齐后同一轮提交四定义查询。插件MT将箭头目标40:12/69:12误当字段名起点（实际均第3列）。原生组完全无插件，插件默认AST虽未采用仍增加协议；各格一次、自然采用和路径不同，只证明本轮整套接入未优于原生，不作纯后端或稳定收益结论。
-
-2026-10-13，上一轮冻结的证据密度版与旧输出版、文本+AST进行同轮对照：两个已见题、每组各一次，Flash/high。以下结果对应上一轮冻结版本。
-
-| 组别 | 所需目标身份 | 严格完整答案 | 总 Token | 请求数 |
-| --- | --- | --- | --- | --- |
-| BASE 文本工具 + AST | 8/8 | 2/2 | 38,109 | 6 |
-| OLD 旧批量输出 + 原生 LSP | 8/8 | 1/2 | 64,571 | 8 |
-| NEW 新证据输出 + 原生 LSP | 8/8 | 2/2 | 60,945 | 9 |
-
-NEW相对OLD少5.6%，但比BASE多59.9%。NEW在KS题未调用批量工具，MB的读取顺序和光标选择在工具返回前已与OLD分化，不能把总差值归因为输出优化。NEW/MB返回69行，其中65行此前read已展示；调用内去重不能解决跨调用重复。OLD严格失分是附加工具表述错误，所需身份仍正确。
-
-六格共23请求/163,625 Token。固定同光标本地比较证明重复源码减少，但新增映射/缺口说明令渲染字节略增，尚不证明稳定Agent成本或严格正确率提升。小样本、有候选路径、已见题且基线含AST，不能称纯rg或外推其他语言。可选功能继续默认关闭；总Token包含缓存读取，不等于现金费用。
-
-同日后续绑定证据协议对照六格完成，共20请求/137,585 Token：文本+AST／修改前／修改后分别32,527／49,598／55,460 Token，请求6／7／7，所需身份均8/8，严格答案1/2、2/2、2/2。该轮新版较修改前贵11.8%、较文本+AST贵70.5%。MB从8个查询降到4个，少先读一个目标文件，Token下降6.3%；KS仍先读四文件再确认，Token增加32.0%，返回74行中73行已读。BASE严格失分为附加源列落在new关键字，所需身份正确；该轮未证明减少“读齐后确认”或整体成本收益，不据此称服务正确率提升，默认关闭。
-
-六题十二格扩大对照（2026-10-14，当前前置LSP/原生四工具各一次）全部完成196340Token/42请求：插件83226/18 vs原生113114/24，合计少26.4%，六题都更低；必要身份均24/24，插件严格6/6、原生3/6（宽口径5/6）。五插件题只read入口后一batch作答；MT插件格未采用LSP，读两文件后直接答，不能把它的费用下降归因内部续查。所需真实映射20/23、后端查询21/23（MA多一无关外部Error续查）；跨入口目标先read后查0/14 vs11/18，同入口声明天然已见单列。grep/glob均未采用；两公开TS仓库、已见题各一次、声明AST关闭，无阅读硬守卫/强迫调用，仍不称通用稳定收益或据此默认启用。详细口径见本地 `docs/evaluation/lsp-entry-native-expanded/report.md`；主源码/构建本轮未改。
+批量定义导航由 **AST 与 LSP 协作**：局部续查时，AST 从定义源码中选择唯一受支持的下一使用点，再交给宿主 LSP 查询其定义。AST 负责语法定位、上下文组织和续查位置选择，跨文件绑定由 LSP 解析。这里的内部 AST 解析不依赖 `ci_find_declarations` 是否注册。
 
 ## 开发资料
 
-- [AGENTS.md](AGENTS.md)：工作范围、验证与版本管理约定。
-- [src/index.ts](src/index.ts)：唯一插件入口，只导出 `name`、`inject`、`apply`。
-- `src/tools/`：模型可见参数、输出、渲染和提示。
-- `src/search/`：候选发现、词法检索及结果整理。
-- `src/ast/`：独立的 TypeScript 语法解析。
-- `src/lsp/`：宿主文件/LSP 服务适配及有界查询。
-
-本地 `docs/design/redevelopment-plan.md` 为总体设计入口；评测资料按实验存于 `docs/evaluation/`，新入口锚点合入验证为 `lsp-entry-anchor-integration/`，最新插件/原生六题对照为 `lsp-entry-native-expanded/`，入口指导模型对照为 `lsp-entry-anchor-small/`，前一插件/原生预算分离对照为 `lsp-continuation-budget-small/`，产品单组测试为 `lsp-plugin-agent-postmerge/`，前置方法对照为 `lsp-preceding-methods/`，合入验证为 `lsp-preceding-integration/`（初版运行时验证见 `lsp-preceding-plugin/`）。这些资料以及 `HANDOFF.md`、旧归档、上游检出和生成物均不跟踪到 Git，干净检出不保证包含它们。
-
-文档改动只需内容、链接和差异检查；行为改动先做最小相关静态检查，再按风险使用现有命令或实际运行。默认不新增测试文件。
+[AGENTS.md](AGENTS.md) 记录项目工作约定。设计、实施计划和评测资料分别保存在本地 `docs/design/`、`docs/plans/`、`docs/evaluation/`，不随 Git 分发。
