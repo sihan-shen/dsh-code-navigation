@@ -51,7 +51,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 
 | 工具 | 用途 | 主要输入 |
 | --- | --- | --- |
-| `ci_find_declarations` | 按精确名称查找 TS/JS 语法声明，返回种类、容器、名称坐标和名称所在行预览 | `names`，可选 `files` |
+| `ci_find_declarations` | 按精确名称查找 TS/JS 语法声明，返回种类、容器、名称坐标和名称所在行预览；省略 `files` 时自动候选最多 20 个文件 | `names`，可选 `files` |
 | `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段 | `terms`，可选 `path`、`limit` |
 | `ci_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用（含声明位置），附有界源码 | `file_path`、`name` |
 | `ci_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义，附有界源码及有限局部续查 | `queries`，每项提供 `file_path`、`line` 和 `symbol` 或 `character` |
@@ -59,6 +59,8 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | `ci_get_code_overview` | 读取显式分组的概览摘要或有界源码 | 可选 `node`、`view`（`summary` / `source`） |
 
 批量导航的 `line` 从 1 开始，`symbol` 使用该行已见的精确标识符；也可改用从 1 开始的 UTF-16 列号 `character`，二者互斥。`queries` 中每项可设置 `definition_only: true`，只查询即时定义。按缺少的事实选择工具，已有源码或返回结果足以回答时即可作答。
+
+`ci_find_declarations` 的系统指导保持精简：只说明何时选择该工具、声明结果可替代哪些读取，以及只补缺失的实现/签名上下文；20 文件候选上限和溢出恢复由工具说明承载，系统指导中的 LSP 坐标交接仅在宿主 `lsp` 工具可见时追加。
 
 ### 实现方法
 

@@ -9,7 +9,7 @@ export function registerFindDeclarationsTool(ctx: Context): void {
     scoped.systemPrompt.section({
       name: 'tool:ci_find_declarations', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 2,
       text: ({ scope }) => scoped.tools.get('ci_find_declarations', scope) === undefined ? ''
-        : 'When exact declaration identity, kind or coordinates are needed and names are known, use ci_find_declarations instead of opening candidate files with read. Its declaration evidence replaces that reading; do not query already-read declarations merely to confirm them. Batch related names within confirmed files; reuse paths from grep/glob/context results. Without files, automatic text discovery has a hard 20-file limit. On overflow confirm candidate paths, then retry once with unchanged names and explicit files if identity or coordinates are still needed. The first-line preview is not a complete signature or inferred type. Read only missing ranges. Native lsp definitions/hover use exact surviving call/import/extends positions; references use selected declaration coordinates. Do not repeat an unchanged empty or overflowing query.',
+        : `Use ci_find_declarations when exact known-name declaration identity, kind or coordinates are missing. Its result replaces reading those declarations; read only missing implementation/signature context.${scoped.tools.get('lsp', scope) === undefined ? '' : ' For references, pass the returned declaration coordinates to native lsp; for definition/hover use an exact surviving call/import/extends position.'}`,
     })
   })
   ctx.tools.register(defineTool({
