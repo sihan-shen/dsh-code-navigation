@@ -153,6 +153,11 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       ? containingAll[0] ?? (bestStart && overlap(bestStart) > 0 ? bestStart : undefined)
       : named.length === 1 ? named[0]
         : sameLine.length > 1 ? undefined : enclosing[0]
+    const spanDecls = seed
+      ? declarations.filter(range => overlap(range) > 0)
+      : declaration ? [declaration] : []
+    const spanFirst = spanDecls.length ? Math.min(seedFirst, ...spanDecls.map(range => range.start)) : undefined
+    const spanLast = spanDecls.length ? Math.max(seedLast, ...spanDecls.map(range => range.end)) : undefined
     const hitAnchors: SourceAnchor[] = []
     const anchorLines = seed
       ? Array.from({ length: seedLast - seedFirst + 1 }, (_, index) => ({ line: seedFirst + index + 1, text: lines[seedFirst + index] ?? '' }))
@@ -221,23 +226,24 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       return pieces
     }
     splitSkipped = false
-    const full = withDeclarationAnchor(declaration
-      ? split(declaration.start, declaration.end, 'declaration-context', declaration.start, declaration.end) : undefined)
+    const full = spanFirst !== undefined && spanLast !== undefined
+      ? withDeclarationAnchor(split(spanFirst, spanLast, 'declaration-context', spanFirst, spanLast)) : undefined
     const fullComplete = !splitSkipped
     const fullBytes = full?.reduce((n, fragment) => n + encoder.encode(fragment.text).byteLength, 0) ?? 0
     let fragments: CodeFragment[] | undefined
     let key: string
-    if (declaration && full && fullComplete && full.length <= limit && fullBytes <= MAX_TEXT_BYTES) {
+    if (spanFirst !== undefined && spanLast !== undefined && full && fullComplete
+      && full.length <= limit && fullBytes <= MAX_TEXT_BYTES) {
       fragments = markSeed(full)
-      key = `${declaration.start}:${declaration.end}:declaration-context`
-    } else if (declaration) {
+      key = `${spanFirst}:${spanLast}:declaration-context`
+    } else if (spanFirst !== undefined && spanLast !== undefined) {
       mark('declaration context reduced to a bounded partial range')
       const ranges = [
-        { first: Math.max(declaration.start, focusFirst), last: Math.min(declaration.end, focusLast), priority: 0 },
-        { first: declaration.start, last: Math.min(declaration.end, declaration.matchStart + 2), priority: 1 },
+        { first: Math.max(spanFirst, focusFirst), last: Math.min(spanLast, focusLast), priority: 0 },
       ]
-      if (declaration.end - 2 > focusLast + 2) {
-        ranges.push({ first: Math.max(declaration.start, declaration.end - 1), last: declaration.end, priority: 2 })
+      for (const range of spanDecls) {
+        ranges.push({ first: range.start, last: Math.min(range.end, range.matchStart + 2), priority: 1 })
+        if (range.end - 2 > focusLast + 2) ranges.push({ first: Math.max(range.start, range.end - 1), last: range.end, priority: 2 })
       }
       const merged: typeof ranges = []
       for (const range of ranges.sort((a, b) => a.first - b.first)) {
@@ -249,7 +255,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       }
       const pieces: CodeFragment[] = []
       for (const range of merged.sort((a, b) => a.priority - b.priority || a.first - b.first)) {
-        const part = split(range.first, range.last, 'declaration-partial', declaration.start, declaration.end)
+        const part = split(range.first, range.last, 'declaration-partial', spanFirst, spanLast)
         if (!part) continue
         for (const piece of part) {
           if (pieces.length >= limit) break
@@ -259,7 +265,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       }
       pieces.sort((a, b) => a.startLine - b.startLine)
       fragments = markSeed(withDeclarationAnchor(pieces))
-      key = `${declaration.start}:${declaration.end}:declaration-partial:${hit.line}`
+      key = `${spanFirst}:${spanLast}:declaration-partial:${hit.line}`
     } else {
       const first = seed ? seedFirst : Math.max(0, hitIndex - 8)
       const last = seed ? seedLast : Math.min(lines.length - 1, hitIndex + 8)
@@ -474,6 +480,7 @@ export async function searchCodeContext(
   }
   if (candidates.length > MAX_FILES) mark('candidate file limit (12)')
   result.vectorOnlyFiles = [...selected].filter(candidate => candidate.entry.terms.size === 0 && candidate.entry.seeds.length > 0).length
+  const vectorOnlyPaths = new Set(vectorOnly.map(candidate => candidate.file))
   const units: ContextUnit[] = []
   for (const { file, entry, target } of selected) {
     exec.signal.throwIfAborted()
@@ -527,18 +534,31 @@ export async function searchCodeContext(
   if (units.length > MAX_WINDOWS) mark('candidate context limit (120)')
   const remaining = units.slice(0, MAX_WINDOWS)
   const represented = new Set<string>()
-  const covered = (fragment: CodeFragment) => {
-    let nextLine = fragment.startLine
-    for (const old of result.fragments.filter(old => old.path === fragment.path)
-      .sort((a, b) => a.startLine - b.startLine)) {
-      if (old.startLine > nextLine) break
-      nextLine = Math.max(nextLine, old.endLine + 1)
-      if (nextLine > fragment.endLine) return true
+  const subtractDisplayed = (fragment: CodeFragment): CodeFragment[] => {
+    const existing = result.fragments.filter(old => old.path === fragment.path)
+      .sort((a, b) => a.startLine - b.startLine)
+    const pieces: [number, number][] = []
+    let cursor = fragment.startLine
+    for (const old of existing) {
+      if (old.endLine < cursor) continue
+      if (old.startLine > fragment.endLine) break
+      if (old.startLine > cursor) pieces.push([cursor, Math.min(fragment.endLine, old.startLine - 1)])
+      cursor = Math.max(cursor, old.endLine + 1)
+      if (cursor > fragment.endLine) break
     }
-    return false
+    if (cursor <= fragment.endLine) pieces.push([cursor, fragment.endLine])
+    const lines = fragment.text.split('\n')
+    return pieces.map(([startLine, endLine]) => {
+      const text = lines.slice(startLine - fragment.startLine, endLine - fragment.startLine + 1).join('\n')
+      const piece: CodeFragment = { ...fragment, startLine, endLine, text,
+        matchedTerms: fragment.matchedTerms.filter(term => text.includes(term)),
+        anchors: fragment.anchors.filter(anchor => anchor.line >= startLine && anchor.line <= endLine) }
+      if (fragment.seedCoverage !== undefined && fragment.seedStartLine !== undefined && fragment.seedEndLine !== undefined) {
+        piece.seedCoverage = startLine <= fragment.seedStartLine && endLine >= fragment.seedEndLine ? 'full' : 'partial'
+      }
+      return piece
+    })
   }
-  const overlaps = (fragment: CodeFragment) => result.fragments.some(old => old.path === fragment.path
-    && old.startLine <= fragment.endLine && old.endLine >= fragment.startLine)
   const vectorShown = new Map<string, number>()
   let textBytes = 0
   while (remaining.length) {
@@ -549,12 +569,16 @@ export async function searchCodeContext(
     if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
     if (index < 0) index = 0
     const unit = remaining.splice(index, 1)[0]
-    if (unit.origin === 'vector' && (vectorShown.get(unit.path) ?? 0) >= 2) continue
-    const available = unit.fragments.filter(fragment => !covered(fragment) && !overlaps(fragment))
+    const unseenVector = [...vectorOnlyPaths].some(path => !vectorShown.has(path))
+    const maxVectorFragments = unseenVector ? 1 : 2
+    if (unit.origin === 'vector' && (vectorShown.get(unit.path) ?? 0) >= maxVectorFragments) continue
+    const available = unit.fragments.flatMap(subtractDisplayed).filter(fragment => fragment.text.length > 0)
     // A vector seed must show the fragment that actually intersects its range, not just the declaration head.
-    const seedFragment = unit.origin === 'vector' ? available.find(fragment => fragment.seededByVector) : undefined
-    if (unit.origin === 'vector' && !seedFragment) { mark('vector seed range omitted by fragment budget'); continue }
-    const additions = unit.origin === 'vector' ? [seedFragment!] : available
+    const seedFragments = unit.origin === 'vector'
+      ? available.filter(fragment => fragment.seededByVector).slice(0, maxVectorFragments - (vectorShown.get(unit.path) ?? 0))
+      : []
+    if (unit.origin === 'vector' && !seedFragments.length) { mark('vector seed range omitted by fragment budget'); continue }
+    const additions = unit.origin === 'vector' ? seedFragments : available
     if (!additions.length) continue
     const size = additions.reduce((n, fragment) => n + encoder.encode(fragment.text).byteLength, 0)
     if (result.fragments.length + additions.length > limit || textBytes + size > MAX_TEXT_BYTES) {
