@@ -143,9 +143,10 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
     const containingStart = seed ? declarations.filter(range => range.matchStart <= seedFirst && range.end >= seedFirst)
       .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
+    const bestStart = containingStart[0]
+    const startCoverage = bestStart ? overlap(bestStart) / Math.max(1, seedLast - seedFirst + 1) : 0
     const declaration = seed
-      ? containingAll[0] ?? containingStart[0]
-        ?? (enclosing[0] && overlap(enclosing[0]) * 2 >= seedLast - seedFirst + 1 ? enclosing[0] : undefined)
+      ? containingAll[0] ?? (bestStart && startCoverage >= 0.5 ? bestStart : undefined)
       : named.length === 1 ? named[0]
         : sameLine.length > 1 ? undefined : enclosing[0]
     const hitAnchors: SourceAnchor[] = []
@@ -277,8 +278,8 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       if (!previous) { byRange.set(`${fragment.startLine}:${fragment.endLine}`, fragment); continue }
       previous.matchedTerms = [...new Set([...previous.matchedTerms, ...fragment.matchedTerms])]
       previous.seededByVector = Boolean(previous.seededByVector || fragment.seededByVector)
-      previous.seedStartLine = previous.seedStartLine ?? fragment.seedStartLine
-      previous.seedEndLine = previous.seedEndLine ?? fragment.seedEndLine
+      if (fragment.seedStartLine !== undefined) previous.seedStartLine = previous.seedStartLine ?? fragment.seedStartLine
+      if (fragment.seedEndLine !== undefined) previous.seedEndLine = previous.seedEndLine ?? fragment.seedEndLine
       previous.anchors = [...new Map([...previous.anchors, ...fragment.anchors]
         .map(anchor => [`${anchor.kind}:${anchor.name}:${anchor.line}:${anchor.character}`, anchor])).values()].slice(0, 3)
     }
