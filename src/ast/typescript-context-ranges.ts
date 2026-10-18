@@ -1,6 +1,9 @@
 import ts from 'typescript'
 
-export interface ContextRange { start: number; end: number; matchStart: number; name: string }
+export interface ContextRange {
+  start: number; end: number; matchStart: number
+  name: string; nameLine: number; nameCharacter: number
+}
 
 // Syntax boundaries only: no symbol resolution or inferred dependency edges.
 export function contextDeclarations(path: string, source: string,
@@ -38,7 +41,11 @@ export function contextDeclarations(path: string, source: string,
       if (source.slice(file.getLineStarts()[start], fullStart).trim()) start = Math.min(start + 1, matchStart)
       const end = file.getLineAndCharacterOfPosition(Math.max(boundary.getStart(file), boundary.end - 1)).line
       const name = binding?.name ?? (ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ? node.name : undefined)
-      if (end - start < 80) ranges.push({ start, end, matchStart, name: name?.getText(file) ?? '' })
+      const namePosition = name ? file.getLineAndCharacterOfPosition(name.getStart(file)) : undefined
+      if (end - start < 80) ranges.push({ start, end, matchStart,
+        name: name?.getText(file) ?? '',
+        nameLine: namePosition?.line ?? matchStart,
+        nameCharacter: namePosition ? namePosition.character + 1 : 1 })
     }
     ts.forEachChild(node, visit)
   }

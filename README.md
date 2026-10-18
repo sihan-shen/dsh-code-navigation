@@ -52,7 +52,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | 工具 | 用途 | 主要输入 |
 | --- | --- | --- |
 | `ci_find_declarations` | 按精确名称查找 TS/JS 语法声明，返回种类、容器、名称坐标和名称所在行预览；省略 `files` 时自动候选最多 20 个文件 | `names`，可选 `files` |
-| `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段 | `terms`，可选 `path`、`limit` |
+| `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段；超预算声明返回部分视图，并附术语覆盖与精确列锚点 | `terms`，可选 `path`、`limit` |
 | `ci_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用（含声明位置），附有界源码 | `file_path`、`name` |
 | `ci_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义，附有界源码及有限局部续查 | `queries`，每项提供 `file_path`、`line` 和 `symbol` 或 `character` |
 | `ci_search_semantic_context` | 在已准备的固定 TS/JS 文件集召回语义相近源码；可选一跳入向引用 | `query`，可选 `path`、`limit`、`expand_relations` |
@@ -67,7 +67,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | 工具 | 实现方法 |
 | --- | --- |
 | [ci_find_declarations](src/search/declaration-search.ts) | 读取指定候选文件；省略文件时先通过宿主字面 `grep` 发现候选。再用 TypeScript AST 筛选精确名称的语法声明，提取种类、容器、名称坐标和所在行预览。 |
-| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。随后按声明锚点、词覆盖及文件分散选择片段，去重、裁剪并返回编号源码。 |
+| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。候选文件在 12 文件上限前按稀有词与声明形态保留；超预算声明返回声明头/命中邻域/省略范围的部分视图。输出按术语报告匹配、选中、锚点与省略原因，片段附最多 3 个 1-based UTF-16 锚点。 |
 | [ci_find_references](src/lsp/declaration-references.ts) | 用 AST 定位已知文件内的唯一具名声明，再调用宿主 LSP 的 `findReferences`，按精确范围去重并附引用源码；短 import/export 语句由 AST 补齐上下文。 |
 | [ci_batch_definitions](src/lsp/batch-definitions.ts) | 用 AST 选择 `line + symbol` 对应的唯一标识符，或使用显式 UTF-16 列号，再调用宿主 LSP 的 `goToDefinition`；根据目标源码补充受支持的声明信息、成员/容器上下文和省略状态。 |
 
