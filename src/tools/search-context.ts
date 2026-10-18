@@ -21,6 +21,7 @@ export function renderCodeContext(value: ContextResult): string {
     if (used + bytes(text) + 1 <= 10 * 1024) { parts.push(text); used += bytes(text) + 1 }
   }
   let omitted = 0
+  let vectorCards = 0
   const groups = new Map<string, ContextResult['fragments']>()
   for (const fragment of value.fragments) {
     const key = `${fragment.path}:${fragment.contextStartLine}:${fragment.contextEndLine}`
@@ -41,7 +42,25 @@ export function renderCodeContext(value: ContextResult): string {
           const line = lines[anchor.line - fragment.startLine]?.trim() ?? ''
           return `${anchor.name}@${anchor.line} | ${line.slice(0, 240)}`
         })
-        return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [navigation${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${before}${after}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]${signatures.length ? `\n  declaration: ${signatures.join(' / ')}` : ''}\n  read ${fragment.path} ${fragment.startLine}-${fragment.endLine} for body; do not infer unshown lines.`
+        const numbered = (list: string[], from: number) => list.map((line, i) => `${from + i} | ${line}`).join('\n')
+        let evidence: string
+        if (vectorCards === 0) {
+          const body: string[] = []
+          let usedBytes = 0
+          for (const line of lines) {
+            const size = bytes(line) + 1
+            if (usedBytes + size > 2000) break
+            body.push(line); usedBytes += size
+          }
+          evidence = `\n  body (top-1, ≤2KB):\n${numbered(body, fragment.startLine)}${body.length < lines.length ? '\n  …' : ''}`
+        } else {
+          const head = lines.slice(0, 3), tail = lines.slice(-3)
+          const parts = [`\n  seed head:\n${numbered(head, fragment.startLine)}`]
+          if (lines.length > 3) parts.push(`  seed tail:\n${numbered(tail, fragment.endLine - tail.length + 1)}`)
+          evidence = parts.join('\n')
+        }
+        vectorCards++
+        return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [navigation${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${before}${after}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]${signatures.length ? `\n  declaration: ${signatures.join(' / ')}` : ''}${evidence}\n  read ${fragment.path} ${fragment.startLine}-${fragment.endLine} for full body; do not infer unshown lines.`
       }
       return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${fragment.source}${fragment.seededByVector ? '; vector-seeded' : ''}${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]\n${fragment.text.split('\n').map((line, i) => `${fragment.startLine + i} | ${line}`).join('\n')}`
     }).join('\n')
