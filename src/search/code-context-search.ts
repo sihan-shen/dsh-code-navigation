@@ -391,7 +391,7 @@ export async function searchCodeContext(
       result.vectorStatus = 'reused'
     } else {
       try {
-        vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 4 },
+        vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 8 },
           { cwd, signal: exec.signal })
       } catch (error) {
         exec.signal.throwIfAborted()
@@ -411,7 +411,9 @@ export async function searchCodeContext(
         if (!supported.test(file)) continue
         let entry = files.get(file)
         if (!entry) { entry = { hits: [], terms: new Set(), seeds: [] }; files.set(file, entry) }
-        entry.seeds.push({ startLine: seed.startLine, endLine: seed.endLine, rank: seed.rank, score: seed.score })
+        if (!entry.seeds.some(existing => seed.startLine <= existing.endLine && seed.endLine >= existing.startLine)) {
+          entry.seeds.push({ startLine: seed.startLine, endLine: seed.endLine, rank: seed.rank, score: seed.score })
+        }
       }
       if (vector.truncated && !reused) {
         const shown = vector.limits.slice(0, 8)

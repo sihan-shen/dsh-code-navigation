@@ -67,7 +67,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服
 | 工具 | 实现方法 |
 | --- | --- |
 | [ci_find_declarations](src/search/declaration-search.ts) | 读取指定候选文件；省略文件时先通过宿主字面 `grep` 发现候选。再用 TypeScript AST 筛选精确名称的语法声明，提取种类、容器、名称坐标和所在行预览。 |
-| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。候选文件在 12 文件上限前按稀有词与声明形态保留；超预算声明返回声明头/命中邻域/省略范围的部分视图。配置 `semanticIndex` 且传入 `query` 时，按 `mode` 把向量命中块的范围作为候选补充；同文件词法/向量范围合并，seed 与相交声明取并集并裁剪部分重叠，词法声明/锚点优先，vector-only 文件最多 2 槽，每文件最多 2 个不同 seed 范围片段，片段级保留 seed 范围与来源。输出按术语报告匹配、选中、锚点、省略原因及 vector 状态；向量片段渲染为导航卡：top-1 卡附最多 2KiB 正文，其余卡为 supporting pointer（仅范围/声明/锚点），按精确范围再读正文；片段附 `seedCoverage`（full/partial）与最多 3 个 1-based UTF-16 锚点；同 Session 内重复 query 复用 seed，不重复 embedding。 |
+| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。候选文件在 12 文件上限前按稀有词与声明形态保留；超预算声明返回声明头/命中邻域/省略范围的部分视图。配置 `semanticIndex` 且传入 `query` 时，按 `mode` 把向量命中块的范围作为候选补充；同文件词法/向量范围合并，seed 与相交声明取并集并裁剪部分重叠，词法声明/锚点优先，vector-only 文件最多 2 槽，每文件最多 2 个不同 seed 范围片段；hybrid 取 top8 并跳过同文件重叠 seed，片段级保留 seed 范围与来源。输出按术语报告匹配、选中、锚点、省略原因及 vector 状态；向量片段渲染为导航卡：top-1 卡附最多 2KiB 正文，其余卡为 supporting pointer（仅范围/声明/锚点），按精确范围再读正文；片段附 `seedCoverage`（full/partial）与最多 3 个 1-based UTF-16 锚点；同 Session 内重复 query 复用 seed，不重复 embedding。 |
 | [ci_find_references](src/lsp/declaration-references.ts) | 用 AST 定位已知文件内的唯一具名声明，再调用宿主 LSP 的 `findReferences`，按精确范围去重并附引用源码；短 import/export 语句由 AST 补齐上下文。 |
 | [ci_batch_definitions](src/lsp/batch-definitions.ts) | 用 AST 选择 `line + symbol` 对应的唯一标识符，或使用显式 UTF-16 列号，再调用宿主 LSP 的 `goToDefinition`；根据目标源码补充受支持的声明信息、成员/容器上下文和省略状态。 |
 

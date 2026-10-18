@@ -42,7 +42,7 @@ export async function searchSemanticSeeds(fs: FileSystem, input: SemanticIndexCo
   const config = resolveConfig(input)
   const query = args.query?.trim(), path = relativePath(args.path ?? '.'), limit = args.limit ?? 4
   if (!query || query.length > 1000 || /\0/.test(query)) throw new Error('query must contain 1–1000 characters')
-  if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
+  if (!Number.isInteger(limit) || limit < 1 || limit > 8) throw new Error('limit must be an integer from 1 to 8')
   const location = await snapshotLocation(fs, exec), { snapshot, bytes } = await loadSnapshot(fs, config, location)
   const candidates = snapshot.chunks.filter(chunk => path === '.' || chunk.path === path || chunk.path.startsWith(path + '/'))
   if (!candidates.length) {

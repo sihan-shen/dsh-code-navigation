@@ -54,7 +54,8 @@ export function renderCodeContext(value: ContextResult): string {
           }
           evidence = `\n  body (top-1, ≤2KB):\n${numbered(body, fragment.startLine)}${body.length < lines.length ? '\n  …' : ''}`
         } else {
-          evidence = '\n  supporting pointer; read only if the primary card lacks a requested fact.'
+          const firstLine = lines.find(line => line.trim())?.trim().slice(0, 240) ?? ''
+          evidence = `\n  supporting pointer${firstLine ? `; first: ${firstLine}` : ''}; read only if the primary card lacks a requested fact.`
         }
         vectorCards++
         return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [navigation${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${before}${after}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]${signatures.length ? `\n  declaration: ${signatures.join(' / ')}` : ''}${evidence}\n  read ${fragment.path} ${fragment.startLine}-${fragment.endLine} for full body; do not infer unshown lines.`
