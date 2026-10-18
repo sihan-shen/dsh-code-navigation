@@ -1,6 +1,8 @@
 {
-  "name": "dsh-code-intelligence",
+  "name": "dsh-code-navigation",
   "version": "0.1.0",
+  "description": "Code navigation and retrieval toolkit for DeepSeek Harness.",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "exports": {

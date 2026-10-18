@@ -35,9 +35,9 @@ export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfi
   const config = { ...setup.semantic, overviews: Object.freeze({ generator: setup.generator, nodes: Object.freeze(nodes) }) }
   const nodeIds = setup.nodes.map(node => node.id), nodeHint = overviewNodeHint(setup)
   ctx.inject(['systemPrompt'], scoped => {
-    scoped.systemPrompt.section({ name: 'tool:ci_get_code_overview', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 3,
-      text: ({ scope }) => scoped.tools.get('ci_get_code_overview', scope) === undefined ? ''
-        : 'Use ci_get_code_overview for an operator-prepared subsystem map when an overall responsibilities/region overview is needed. Omit node for the root/catalog, then select an explicit node if useful. Generated claims carry source pointers, not semantic proof; read cited missing conditions for exact behavior. Source view is bounded file-start sampling. Missing/stale summaries require operator preparation, not repeated identical calls. Reuse sufficient evidence and stop.',
+    scoped.systemPrompt.section({ name: 'tool:nav_get_code_overview', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 3,
+      text: ({ scope }) => scoped.tools.get('nav_get_code_overview', scope) === undefined ? ''
+        : 'Use nav_get_code_overview for an operator-prepared subsystem map when an overall responsibilities/region overview is needed. Omit node for the root/catalog, then select an explicit node if useful. Generated claims carry source pointers, not semantic proof; read cited missing conditions for exact behavior. Source view is bounded file-start sampling. Missing/stale summaries require operator preparation, not repeated identical calls. Reuse sufficient evidence and stop.',
     })
   })
   const string = { type: 'string' } as const, integer = { type: 'integer' } as const
@@ -45,7 +45,7 @@ export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfi
   const uint = { ...integer, required: true } as const, text = { ...string, required: true } as const
   const costs = { generationCalls: uint, inputBytes: uint, outputBytes: uint, reportedTokens: uint,
     reportedRequests: uint, unknownTokenCalls: uint, unknownRequestCalls: uint }
-  ctx.tools.register(defineTool({ name: 'ci_get_code_overview',
+  ctx.tools.register(defineTool({ name: 'nav_get_code_overview',
     description: 'Read an explicitly prepared subsystem overview and source citations. Use for overall responsibilities and where to inspect, not exact conditions or binding claims. No query-time model, embedding or LSP calls. Omit node for root and catalog. view:source reads bounded raw source without requiring summaries; it samples from file starts and can omit behavior. Missing/stale summary requires operator prepareSemanticOverviews (rebuild:true after changes); do not retry unchanged calls.',
     parameters: { node: { ...string, enum: nodeIds, description: `Exact configured node id. ${nodeHint}` },
       view: { ...string, enum: ['summary', 'source'], description: 'Default summary; source returns a bounded raw view of the same node file set.' } },

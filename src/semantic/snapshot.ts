@@ -15,7 +15,7 @@ export async function snapshotLocation(fs: FileSystem, exec: IndexExecution): Pr
   const root = await fs.resolve('.', { cwd: exec.cwd, signal })
   if ((await fs.stat(root, signal))?.type !== 'directory') throw new Error('workspace must be a directory')
   // 不允许缓存目录或最终文件链接到别处；路径不存在时由宿主原子写创建。
-  for (const path of ['.code-intelligence', INDEX_PATH]) {
+  for (const path of ['.code-navigation', INDEX_PATH]) {
     const info = await fs.lstat(path, { cwd: exec.cwd }, signal)
     if (info && info.type !== (path === INDEX_PATH ? 'file' : 'directory')) {
       throw new Error('semantic index directory/file must be ordinary paths, without symlinks')

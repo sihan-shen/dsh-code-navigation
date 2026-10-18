@@ -28,7 +28,7 @@ export function overviewNodeHint(setup: OverviewSetup): string {
   const catalog = setup.nodes.map(node => ({ id: node.id, label: node.label,
     ...(encoder.encode(JSON.stringify(node.files[0])).byteLength <= 256
       ? { path: node.files[0] } : { pathOmitted: true }) }))
-  return `Configured nodes: ${JSON.stringify(catalog)}. Default: ${JSON.stringify(setup.rootId)}. Example: ci_get_code_overview(${JSON.stringify({ node: setup.rootId })}).`
+  return `Configured nodes: ${JSON.stringify(catalog)}. Default: ${JSON.stringify(setup.rootId)}. Example: nav_get_code_overview(${JSON.stringify({ node: setup.rootId })}).`
 }
 
 export async function getCodeOverview(fs: FileSystem, input: SemanticIndexConfig,

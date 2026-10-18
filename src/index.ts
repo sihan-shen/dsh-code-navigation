@@ -8,7 +8,7 @@ import { registerToolCooperationPrompt } from './tools/tool-cooperation.js'
 import { registerCodeOverviewTool } from './tools/code-overview.js'
 import type { SemanticIndexConfig } from './semantic/types.js'
 
-export const name = 'code-intelligence'
+export const name = 'code-navigation'
 export const inject = ['tools', 'fs']
 
 export function apply(ctx: Context, config: {

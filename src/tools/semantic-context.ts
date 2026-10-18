@@ -33,16 +33,16 @@ export function renderSemanticContext(value: SemanticContextResult): string {
 export function registerSemanticContextTool(ctx: Context, input: SemanticIndexConfig): void {
   const config = resolveConfig(input)
   ctx.inject(['systemPrompt'], scoped => {
-    scoped.systemPrompt.section({ name: 'tool:ci_search_semantic_context',
+    scoped.systemPrompt.section({ name: 'tool:nav_search_semantic_context',
       order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 2,
-      text: ({ scope }) => scoped.tools.get('ci_search_semantic_context', scope) === undefined ? ''
-        : 'Use ci_search_semantic_context for conceptual TS/JS implementation questions within the operator-prepared fixed file set, especially when literal terms are unknown. Reuse its numbered source; read only missing facts. Configured prepared one-hop references carry LSP binding and AST roles; argument is not a call, callee is not runtime execution. Similarity and AST containment do not prove calls or bindings; use visible LSP tools only for remaining semantic claims. An absent or stale index requires operator preparation, not repeated identical queries. Stop when the required facts are covered.',
+      text: ({ scope }) => scoped.tools.get('nav_search_semantic_context', scope) === undefined ? ''
+        : 'Use nav_search_semantic_context for conceptual TS/JS implementation questions within the operator-prepared fixed file set, especially when literal terms are unknown. Reuse its numbered source; read only missing facts. Configured prepared one-hop references carry LSP binding and AST roles; argument is not a call, callee is not runtime execution. Similarity and AST containment do not prove calls or bindings; use visible LSP tools only for remaining semantic claims. An absent or stale index requires operator preparation, not repeated identical queries. Stop when the required facts are covered.',
     })
   })
   const position = { path: { type: 'string', required: true }, startLine: { type: 'integer', required: true },
     endLine: { type: 'integer', required: true } } as const
   ctx.tools.register(defineTool({
-    name: 'ci_search_semantic_context',
+    name: 'nav_search_semantic_context',
     description: 'Retrieve bounded numbered TS/JS source for a natural-language concept from an explicitly prepared fixed-file semantic snapshot. Computes only the query embedding; never builds or updates document vectors. Optional path narrows this fixed set. Reuse returned source instead of reading it again; similarity ranks candidates and does not prove semantic relations or completeness. AST names/ranges/parent identities are syntax metadata only. Missing/stale/incompatible index requires the operator to run prepareSemanticIndex, with rebuild:true for changes; do not repeat unchanged calls. When relations are configured, also reads prepared one-hop incoming references whose declaration names occur in ranked chunks, within the same path and source budget. No query-time LSP. expand_relations:false keeps the candidate-only baseline; missing/stale relations require prepareSemanticRelations. Lexical search remains available separately.',
     parameters: {
       query: { type: 'string', required: true, description: 'Concept or behavior to locate, 1–1000 characters; the local embedding backend handles query instructions.' },

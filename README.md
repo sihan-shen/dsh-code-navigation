@@ -1,23 +1,61 @@
-# dsh-code-intelligence
+# dsh-code-navigation
 
-DeepSeek Harness 的单包代码检索插件，默认提供 AST 声明定位，可按需启用词法 RAG（源码上下文检索）、固定文件语义检索、子系统概览、声明引用查询和批量 LSP 定义导航。
+Code navigation and retrieval toolkit for DeepSeek Harness.
 
-## 项目架构
+本项目是一个单包 Cordis 插件：默认提供 TypeScript/JavaScript 语法声明定位；按需启用词法 RAG、固定文件语义索引、Hybrid 词法+向量检索、子系统概览、声明引用和批量 LSP 定义导航。所有检索工具只负责召回和整理源码证据，不调用生成模型；是否使用字面搜索、AST、向量或 LSP 由工具与配置显式区分。
 
-插件入口负责装配和注册工具，检索与导航复用宿主的文件、搜索及 LSP 服务，语言专属语法解析由 TypeScript 提供。
+包名和仓库名均为 `dsh-code-navigation`；当前本地检出目录可能仍保留旧目录名，克隆/发布时应使用 `dsh-code-navigation`。`package.json` 的 `description` 与上面的 Short Description 一致。
 
-| 模块 | 职责 |
-| --- | --- |
-| `src/index.ts` | 唯一插件入口，导出 `name`、`inject`、`apply` |
-| `src/tools/` | 模型可见的参数、输出、渲染和使用指导 |
-| `src/search/` | 候选发现、词法检索、工作区文件约束及结果整理 |
-| `src/ast/` | TypeScript/JavaScript 语法解析 |
-| `src/lsp/` | 宿主文件与 LSP 服务接入及有界导航 |
-| `src/semantic/` | 固定源码快照、向量、一跳引用和显式概览的准备与持久复用 |
+## Table of Contents
 
-## 构建与接入
+- [Security](#security)
+- [Background](#background)
+- [Install](#install)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Language Scope](#language-scope)
+- [Tools](#tools)
+- [RAG Modes and Principles](#rag-modes-and-principles)
+- [Semantic Index Preparation](#semantic-index-preparation)
+- [Batch LSP Navigation](#batch-lsp-navigation)
+- [API](#api)
+- [Contributing](#contributing)
+- [License](#license)
 
-当前为私有本地包。需要 Node.js、pnpm，以及已装配 `tools`、`fs` 服务的 Harness 宿主。依赖版本由 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml) 固定。
+## Security
+
+- 语义索引只读取显式配置的固定文件集合，不进行全仓 glob、自动发现或自动更新。
+- 插件不内置模型下载、embedding 网络客户端或凭据管理；embedding 和 LSP 由宿主/操作者提供。
+- 索引和概览保存在工作区 `.code-navigation/`；不要把密钥、认证信息或未授权源码加入索引文件。
+- LSP 工具使用宿主提供的服务；语言服务器的安装、权限和生命周期由宿主负责。
+- 查询结果中的源码片段和摘要只作为证据线索，不代表运行时或完整语义证明。
+
+## Background
+
+代码检索通常需要在“精确符号”和“自然语言概念”之间切换。纯字面搜索对已知标识符可靠，但不擅长概念召回；向量检索能补充候选，却不能替代源码证据。本项目把两类能力拆成不同工具和模式：
+
+- 先用最小、明确的检索信号定位文件和范围；
+- 用 TypeScript AST 补声明身份、容器和有界上下文；
+- 可选地用固定文件语义索引补充候选；
+- 绑定、引用和定义跳转交给宿主 LSP；
+- 最终答案仍由 Agent 读取和判断源码。
+
+抽象依赖为 DeepSeek Harness 的 `tools`、`fs` 服务，以及可选的 `lsp`、`systemPrompt` 服务。依赖版本由 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml) 固定。
+
+### Rename and migration
+
+本次命名统一是**破坏性变更**：
+
+- 包名：`dsh-code-intelligence` → `dsh-code-navigation`
+- 插件 `name`：`code-intelligence` → `code-navigation`
+- 工具前缀：`ci_*` → `nav_*`
+- 索引目录：`.code-intelligence/` → `.code-navigation/`
+
+旧工具名不会同时注册；旧 `.code-intelligence/` 索引不会被新版本读取。升级后需要重新准备语义索引、关系或概览，不能直接复用旧目录。
+
+## Install
+
+需要 Node.js、pnpm，以及已装配 `tools`、`fs` 服务的 Harness 宿主。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -25,91 +63,189 @@ pnpm typecheck
 pnpm build
 ```
 
-在宿主的 Cordis Context 上加载构建入口，替换为本机绝对路径，并按需传入下表配置：
+当前为私有本地包，未发布到公共 registry。安装完成后，在宿主 Cordis Context 上加载构建入口，替换为实际绝对路径：
 
 ```ts
-import * as codeIntelligence from '/absolute/path/to/dsh-code-intelligence-new/dist/index.js'
+import * as codeNavigation from '/absolute/path/to/dsh-code-navigation/dist/index.js'
 
-await ctx.plugin(codeIntelligence, {})
+await ctx.plugin(codeNavigation, {})
 ```
 
-LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider，语言服务器的安装、配置和生命周期由宿主负责。使用指导通过宿主的可选 `systemPrompt` 服务注入。
+## Usage
 
-## 配置
+最小用法是只启用默认的 AST 声明定位：
+
+```ts
+await ctx.plugin(codeNavigation, {
+  enableFindDeclarations: true,
+})
+```
+
+启用词法 RAG 和可选语义索引：
+
+```ts
+await ctx.plugin(codeNavigation, {
+  enableCodeContext: true,
+  semanticIndex, // 显式准备的固定文件索引；未配置时只有词法模式
+})
+```
+
+典型工具选择：
+
+1. 已知精确名称：`nav_find_declarations`。
+2. 需要实现源码：`nav_search_context`（词法模式）。
+3. 需要概念召回且已有索引：`nav_search_context` + `query` + `mode: 'hybrid'`。
+4. 需要纯语义召回：`nav_search_semantic_context`。
+5. 已知声明或使用点的绑定/引用：`nav_find_references`、`nav_batch_definitions`。
+6. 子系统导航：`nav_get_code_overview`；摘要不是实现证据。
+
+## Configuration
 
 | 配置 | 默认 | 作用 |
 | --- | --- | --- |
-| `enableFindDeclarations` | `true` | 注册 `ci_find_declarations` |
-| `enableCodeContext` | `false` | 注册词法 RAG 工具 `ci_search_context` |
-| `enableDeclarationReferences` | `false` | 有宿主 LSP 服务时注册 `ci_find_references` |
-| `enablePrecedingLsp` | `false` | 有宿主 LSP 服务时注册 `ci_batch_definitions`，并提供前置导航指导 |
-| `enableToolCooperationPrompt` | `false` | 按实际可见工具生成协同使用指导 |
-| `semanticIndex` | 未配置 | 注册 `ci_search_semantic_context`；须提供本地 embedding 回调并显式准备固定文件索引 |
-| `semanticIndex.overviews` | 未配置 | 额外注册 `ci_get_code_overview`；须配置分组、生成回调并显式准备摘要 |
+| `enableFindDeclarations` | `true` | 注册 `nav_find_declarations` |
+| `enableCodeContext` | `false` | 注册 `nav_search_context`；配置 `semanticIndex` 后支持 `query`/`mode` |
+| `enableDeclarationReferences` | `false` | 有宿主 LSP 时注册 `nav_find_references` |
+| `enablePrecedingLsp` | `false` | 有宿主 LSP 时注册 `nav_batch_definitions`，并注入前置导航指导 |
+| `enableToolCooperationPrompt` | `false` | 按当前 Session 实际可见的工具生成协同使用指导 |
+| `semanticIndex` | 未配置 | 注册 `nav_search_semantic_context`；要求显式准备固定文件索引 |
+| `semanticIndex.overviews` | 未配置 | 额外注册 `nav_get_code_overview`；要求显式准备概览 |
 
-## 工具
+LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider；缺少服务时不会注册对应工具。系统提示通过宿主的可选 `systemPrompt` 服务注入。
+
+## Language Scope
+
+当前只对 **TypeScript（`.ts`）** 做过实际验证。实现包含 `.tsx`、`.js`、`.jsx` 的语法路径和配置校验，但这些语言/扩展尚未独立测试；不要把 TypeScript 的结果外推到 JavaScript、JSX、TSX 或其他语言。批量 LSP 工具目前也只接受 `.ts` 使用点。
+
+## Tools
 
 | 工具 | 用途 | 主要输入 |
 | --- | --- | --- |
-| `ci_find_declarations` | 按精确名称查找 TS/JS 语法声明，返回种类、容器、名称坐标和名称所在行预览；省略 `files` 时自动候选最多 20 个文件 | `names`，可选 `files` |
-| `ci_search_context` | 词法 RAG：按字面代码词检索 TS/JS 源码，结合语法上下文返回有界源码片段；配置语义索引时可选用自然语言 `query` 做词法+向量候选并集 | `terms` 和/或 `query`，可选 `mode`、`path`、`limit` |
-| `ci_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用（含声明位置），附有界源码 | `file_path`、`name` |
-| `ci_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义，附有界源码及有限局部续查 | `queries`，每项提供 `file_path`、`line` 和 `symbol` 或 `character` |
-| `ci_search_semantic_context` | 在已准备的固定 TS/JS 文件集召回语义相近源码；可选一跳入向引用 | `query`，可选 `path`、`limit`、`expand_relations` |
-| `ci_get_code_overview` | 读取显式分组的概览摘要或有界源码 | 可选 `node`、`view`（`summary` / `source`） |
+| `nav_find_declarations` | 按精确名称查找 TS/JS 语法声明；返回种类、容器、名称坐标和首行预览。省略 `files` 时用宿主 grep 自动发现最多 20 个候选文件 | `names`（1–8），可选 `files`（1–20） |
+| `nav_search_context` | 词法 RAG：字面匹配 + AST 声明上下文/有界源码；配置索引且传 `query` 时支持词法+向量候选并集 | `terms`（1–6）和/或 `query`，可选 `mode`、`path`、`limit` |
+| `nav_search_semantic_context` | 纯语义 RAG：在已准备的固定文件快照中按 query 向量召回源码块；可选一跳引用扩展 | `query`，可选 `path`、`limit`（1–6）、`expand_relations` |
+| `nav_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用，附有界源码 | `file_path`、`name` |
+| `nav_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义；支持 `line + symbol` 或 `line + character` | `queries`（1–8） |
+| `nav_get_code_overview` | 读取显式分组的概览摘要或有界源码 | 可选 `node`、`view`（`summary`/`source`） |
 
-批量导航的 `line` 从 1 开始，`symbol` 使用该行已见的精确标识符；也可改用从 1 开始的 UTF-16 列号 `character`，二者互斥。`queries` 中每项可设置 `definition_only: true`，只查询即时定义。按缺少的事实选择工具，已有源码或返回结果足以回答时即可作答。
+`nav_search_context` 的 `terms` 与 `query` 至少提供一个；`mode` 默认 `auto`：
 
-`ci_find_declarations` 的系统指导保持精简：只说明何时选择该工具、声明结果可替代哪些读取，以及只补缺失的实现/签名上下文；20 文件候选上限和溢出恢复由工具说明承载，系统指导中的 LSP 坐标交接仅在宿主 `lsp` 工具可见时追加。
+- `lexical`：只走字面检索，不调用向量；
+- `auto`：词法覆盖为空或某 term 无候选时才尝试向量；
+- `hybrid`：显式并集词法候选与向量候选，需要 `query` 和 `semanticIndex`。
 
-### 实现方法
+无 `semanticIndex` 时，schema 不暴露 `query`/`mode`。
 
-| 工具 | 实现方法 |
-| --- | --- |
-| [ci_find_declarations](src/search/declaration-search.ts) | 读取指定候选文件；省略文件时先通过宿主字面 `grep` 发现候选。再用 TypeScript AST 筛选精确名称的语法声明，提取种类、容器、名称坐标和所在行预览。 |
-| [ci_search_context](src/search/code-context-search.ts) | 通过宿主字面 `grep` 召回命中，读取候选文件；用 TypeScript AST 提取受支持的函数、方法或变量初始化上下文，其余情况使用词法窗口。候选文件在 12 文件上限前按稀有词与声明形态保留；超预算声明返回声明头/命中邻域/省略范围的部分视图。配置 `semanticIndex` 且传入 `query` 时，按 `mode` 把向量命中块的范围作为候选补充；同文件词法/向量范围合并，seed 与相交声明取并集并裁剪部分重叠，词法声明/锚点优先，vector-only 文件最多 2 槽，每文件最多 2 个不同 seed 范围片段；hybrid 取 top8 并跳过同文件重叠 seed，片段级保留 seed 范围与来源。输出按术语报告匹配、选中、锚点、省略原因及 vector 状态；向量片段渲染为导航卡：top-1 卡附最多 2KiB 正文，其余卡为 supporting pointer（仅范围/声明/锚点），按精确范围再读正文；片段附 `seedCoverage`（full/partial）与最多 3 个 1-based UTF-16 锚点；同 Session 内重复 query 复用 seed，不重复 embedding。 |
-| [ci_find_references](src/lsp/declaration-references.ts) | 用 AST 定位已知文件内的唯一具名声明，再调用宿主 LSP 的 `findReferences`，按精确范围去重并附引用源码；短 import/export 语句由 AST 补齐上下文。 |
-| [ci_batch_definitions](src/lsp/batch-definitions.ts) | 用 AST 选择 `line + symbol` 对应的唯一标识符，或使用显式 UTF-16 列号，再调用宿主 LSP 的 `goToDefinition`；根据目标源码补充受支持的声明信息、成员/容器上下文和省略状态。 |
+## RAG Modes and Principles
 
-这里的**词法 RAG**是把检索到的源码片段作为 Agent 生成回答时的证据：召回使用字面匹配，AST 用于上下文组织和选择，检索工具本身不调用生成模型或向量模型。
+本包的 RAG 只负责检索和证据整理，不调用生成模型。
 
-批量定义导航由 **AST 与 LSP 协作**：局部续查时，AST 从定义源码中选择唯一受支持的下一使用点，再交给宿主 LSP 查询其定义。AST 负责语法定位、上下文组织和续查位置选择，跨文件绑定由 LSP 解析。这里的内部 AST 解析不依赖 `ci_find_declarations` 是否注册。
+| 模式 | 工具 | 检索信号 | 原理 | 边界 |
+| --- | --- | --- | --- | --- |
+| 词法 RAG | `nav_search_context`（无 `semanticIndex`） | 字面 `grep` | 宿主 grep 召回文件和行；TypeScript AST 扩展为声明头、命中邻域或词法窗口；按术语、稀有度和声明形态选择有界片段 | 不做 embedding、不做语义相似、不调用生成模型 |
+| Hybrid RAG | `nav_search_context` + `semanticIndex` + `query` | grep + 固定文件向量索引 | 词法候选与向量 top seeds 并集；词法声明/锚点优先，向量只提供候选文件和范围；seed 与相交声明取并集、裁剪部分重叠；向量片段以导航卡呈现，源码仍从当前工作区读取 | 不做 raw score 融合/RRF、不把 cosine 当语义证明、不自动建索引、不扩到未准备文件 |
+| 纯语义 RAG | `nav_search_semantic_context` | 固定文件向量索引 | 对已准备快照计算 query embedding，按 top-k chunk 返回源码；配置 relations 时可加一跳入向引用 | 不做字面候选、不调用生成模型、不自动发现或增量更新 |
+| AST 声明定位 | `nav_find_declarations` | TypeScript AST | 按精确名称筛选语法声明，返回种类、容器和坐标 | 不是证据召回；不证明运行时行为 |
+| LSP 导航 | `nav_find_references`、`nav_batch_definitions` | AST + 宿主 LSP | 已知声明/使用点交给宿主 LSP 解析绑定、引用或定义 | 不建全仓图；不替代源码证据 |
+| 概览导航 | `nav_get_code_overview` | 显式分组摘要 | 返回节点摘要或基础快照源码 | 摘要不是正确性或完整实现证明 |
 
-### 固定文件语义检索与概览准备
+Hybrid 的边界：
 
-通过包子入口 `dsh-code-intelligence/semantic-index` 显式准备，再传入同一配置加载插件。以下示例假定宿主 `ctx`、工作区绝对路径 `cwd` 和本地回调 `localEmbedding` 已提供：
+- 向量只补充候选，不替代词法声明/锚点；最终片段仍从当前工作区读取。
+- `seedCoverage=full` 只表示片段覆盖 seed 范围，不表示覆盖题目或完整语义。
+- 向量片段默认渲染为导航卡：top-1 卡附最多 2KiB 正文，其余为范围/声明/锚点 pointer；未展示正文不作为证据。
+- 当前没有 RRF、LLM reranker、全仓图、摘要树或查询改写。
+- 同一 Session 内相同 query 的 vector seed 可有界复用（最多 8 条），不跨 Session；索引重建后应新开 Session。
+
+## Semantic Index Preparation
+
+语义能力不会自动发现文件、下载模型或更新索引。通过包子入口显式准备：
 
 ```ts
 import {
   prepareSemanticIndex,
   type SemanticIndexConfig,
-} from 'dsh-code-intelligence/semantic-index'
+} from 'dsh-code-navigation/semantic-index'
 
 const semanticIndex: SemanticIndexConfig = {
-  files: ['src/service.ts'], // 替换为明确的 TS/JS 文件集合
+  files: ['src/service.ts'], // 1–32 个明确的 TS/JS 文件
   embedding: localEmbedding,
 }
 await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
-await ctx.plugin(codeIntelligence, { semanticIndex })
+await ctx.plugin(codeNavigation, { semanticIndex })
 ```
 
-`localEmbedding` 实现同入口导出的 `LocalEmbedding`：提供模型/预处理修订 `id`、向量 `dimensions` 和 `embed(texts, purpose, signal)`，按输入顺序返回有限非零向量；`purpose` 为 `document` 或 `query`。将取消信号传给后端。插件不内置模型下载或 embedding 网络客户端。
+`localEmbedding` 实现 `LocalEmbedding`：
 
-需要概览时，在准备前为配置增加 `overviews`，提供 `OverviewGenerator` 生成回调和显式节点，例如：
+- `id`：包含模型、pooling、预处理和 query/document 指令版本；
+- `dimensions`：1–4096；
+- `embed(texts, purpose, signal)`：按顺序返回有限非零向量；`purpose` 为 `document` 或 `query`，需传递取消信号。
+
+索引固定为配置的 `files`，不进行 glob、全仓发现或增量更新；源码、模型身份、解析版本或固定范围变化后，显式调用 `prepareSemanticIndex(..., { rebuild: true })`。
+
+### Overviews
 
 ```ts
 semanticIndex.overviews = {
-  generator: overviewGenerator, // 已提供的 OverviewGenerator 实现
+  generator: overviewGenerator, // OverviewGenerator 实现
   nodes: [{ id: 'service', label: '服务概览', files: ['src/service.ts'] }],
 }
+await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+await prepareSemanticOverviews(ctx.fs, semanticIndex, { cwd })
 ```
 
-先准备基础索引，再调用同子入口的 `prepareSemanticOverviews(ctx.fs, semanticIndex, { cwd })`，最后加载插件。查询时省略 `node` 使用配置根节点；`view: 'summary'` 读取摘要，`view: 'source'` 读取原文且不要求摘要已经生成。查询不调用生成器。
+节点最多 8 个、最多 3 层；父节点只聚合子摘要。查询 `view: 'summary'` 读摘要，`view: 'source'` 读基础快照源码，不要求摘要已生成；查询不调用生成器。
 
-需要持久一跳引用时，增加 `relations`（准确的 `lspId`、`environmentFiles` 和声明名称坐标 `anchors`），在基础索引准备后调用 `prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })`。构建需要宿主 LSP，查询不调用 LSP；`expand_relations: false` 可关闭查询中的引用扩展。
+### Relations
 
-准备结果持久化在各工作区的 `.code-intelligence/`，有效快照可跨进程复用。源码、固定范围、模型身份、生成器或分组变化后，按相应准备接口显式传入 `rebuild: true` 重建；不同工作区/worktree 的索引不可直接复用。完整配置类型见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
+```ts
+semanticIndex.relations = {
+  lspId: 'typescript-language-server@5.3.0',
+  environmentFiles: ['tsconfig.json'],
+  anchors: [{ path: 'src/service.ts', line: 10, character: 3 }],
+}
+await prepareSemanticIndex(ctx.fs, semanticIndex, { cwd })
+await prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })
+```
 
-## 开发资料
+查询侧只读取已准备关系，不调用 LSP；`expand_relations: false` 可关闭扩展。关系是一跳语法/引用线索，不证明运行时调用。
 
-[AGENTS.md](AGENTS.md) 记录项目工作约定。设计、实施计划和评测资料分别保存在本地 `docs/design/`、`docs/plans/`、`docs/evaluation/`，不随 Git 分发。
+准备结果保存在工作区 `.code-navigation/`；不同工作区/worktree 的索引不能直接复用。完整类型见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
+
+## Batch LSP Navigation
+
+`nav_batch_definitions` 只处理 `.ts` 中已见的使用点：
+
+- 优先 `line + symbol`，也可用一基 UTF-16 `line + character`，二者互斥；
+- 每个 cursor 最多 3 个目标，单文件 64KiB、总读取 384KiB、96 个唯一源码行、12000 UTF-8 渲染字节；
+- 省略 `definition_only` 时，可对唯一的 callback/new、return this、构造器赋值或数组初始化调用做最多两层、四个内部续查；
+- `file_too_large` 不能靠移动 cursor 或换路径解决；应复用已有证据或改用原生 LSP/聚焦 read；
+- 静态定义不证明运行时 dispatch。
+
+`nav_find_references` 只对已知 `.ts` 文件内唯一具名声明发起一次宿主引用查询；同名歧义返回候选，不猜选。源码片段是引用上下文，不是调用层级证明。
+
+## API
+
+公开入口：
+
+- 主入口 `dsh-code-navigation`：导出 `name`、`inject`、`apply`，由 Harness 装载。
+- 子入口 `dsh-code-navigation/semantic-index`：导出 `prepareSemanticIndex`、`prepareSemanticOverviews`、`prepareSemanticRelations`，以及 `LocalEmbedding`、`SemanticIndexConfig`、`SemanticRelationsConfig`、`OverviewGenerator` 等类型。
+
+工具是模型可见 API，参数、输出和渲染实现位于 [src/tools/](src/tools/)；检索与语义准备实现位于 [src/search/](src/search/) 和 [src/semantic/](src/semantic/)。完整类型定义见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
+
+## Contributing
+
+当前为私有本地包，不接受外部 Pull Request。问题、缺陷和改动请求请通过仓库所有者或内部协作渠道提出；提交前请运行：
+
+```sh
+pnpm typecheck
+pnpm build
+```
+
+项目工作约定见 [AGENTS.md](AGENTS.md)。修改检索协议、工具 schema 或语义索引格式时，应同步更新本 README 和相关设计文档。
+
+## License
+
+[MIT](LICENSE) © 2026 dsh-code-navigation contributors。
+
+本项目采用与常见 DeepSeek Harness 插件一致的 MIT 协议。

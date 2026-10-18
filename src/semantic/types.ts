@@ -46,7 +46,7 @@ export interface SemanticSnapshot {
   omissions: string[]
 }
 
-export const INDEX_PATH = '.code-intelligence/semantic-index.json'
+export const INDEX_PATH = '.code-navigation/semantic-index.json'
 export const MAX_FILE_BYTES = 1024 * 1024
 export const MAX_SOURCE_BYTES = 4 * MAX_FILE_BYTES
 export const MAX_INDEX_BYTES = 64 * MAX_FILE_BYTES
@@ -67,7 +67,7 @@ export function resolveConfig(config: SemanticIndexConfig): SemanticIndexConfig 
     throw new Error('semantic index requires 1–32 explicit files')
   }
   const files = config.files.map(file => relativePath(file)).sort()
-  if (files.some(file => !/\.(ts|tsx|js|jsx)$/i.test(file) || file.startsWith('.code-intelligence/'))
+  if (files.some(file => !/\.(ts|tsx|js|jsx)$/i.test(file) || file.startsWith('.code-navigation/'))
     || new Set(files).size !== files.length) throw new Error('semantic index requires unique TS/JS source paths')
   const embedding = config.embedding
   if (!embedding || typeof embedding.id !== 'string' || !embedding.id.trim() || embedding.id.length > 256
@@ -92,7 +92,7 @@ export function resolveConfig(config: SemanticIndexConfig): SemanticIndexConfig 
     const environmentFiles = r.environmentFiles.map(relativePath).sort()
     if (new Set(anchors.map(a => JSON.stringify(a))).size !== anchors.length
       || new Set(environmentFiles).size !== environmentFiles.length
-      || environmentFiles.some(path => path === '.' || path.startsWith('.code-intelligence/'))) throw new Error('duplicate anchors or invalid environment files')
+      || environmentFiles.some(path => path === '.' || path.startsWith('.code-navigation/'))) throw new Error('duplicate anchors or invalid environment files')
     relations = Object.freeze({ lspId: r.lspId, anchors: Object.freeze(anchors), environmentFiles: Object.freeze(environmentFiles) })
   }
   return { relations, files: Object.freeze(files), embedding: Object.freeze({ id: embedding.id,

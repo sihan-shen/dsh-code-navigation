@@ -7,7 +7,7 @@ import type { SnapshotLocation } from './snapshot.js'
 import { encoder, resolveConfig } from './types.js'
 import type { IndexExecution, RelationAnchor, SemanticIndexConfig, SemanticSnapshot } from './types.js'
 
-const RELATIONS_PATH = '.code-intelligence/semantic-relations.json'
+const RELATIONS_PATH = '.code-navigation/semantic-relations.json'
 const MAX_BYTES = 512 * 1024
 export interface ReferenceEvidence extends ReferenceSite {
   path: string
