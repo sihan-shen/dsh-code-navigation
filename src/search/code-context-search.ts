@@ -147,11 +147,10 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
     const containingAll = seed ? declarations.filter(range => range.matchStart <= seedFirst && range.end >= seedLast)
       .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
     const containingStart = seed ? declarations.filter(range => range.matchStart <= seedFirst && range.end >= seedFirst)
-      .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
+      .sort((a, b) => overlap(b) - overlap(a) || (a.end - a.start) - (b.end - b.start)) : []
     const bestStart = containingStart[0]
-    const startCoverage = bestStart ? overlap(bestStart) / Math.max(1, seedLast - seedFirst + 1) : 0
     const declaration = seed
-      ? containingAll[0] ?? (bestStart && startCoverage >= 0.5 ? bestStart : undefined)
+      ? containingAll[0] ?? (bestStart && overlap(bestStart) > 0 ? bestStart : undefined)
       : named.length === 1 ? named[0]
         : sameLine.length > 1 ? undefined : enclosing[0]
     const hitAnchors: SourceAnchor[] = []
@@ -393,7 +392,7 @@ export async function searchCodeContext(
         const reason = error instanceof Error ? error.message : String(error)
         result.vectorStatus = /stale/.test(reason) ? 'stale' : /invalid or incompatible/.test(reason) ? 'invalid' : 'unavailable'
         if (terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
-        mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
+        mark(`vector unavailable (${result.vectorStatus}); lexical fallback`)
       }
     }
     if (vector) {
@@ -540,7 +539,7 @@ export async function searchCodeContext(
   }
   const overlaps = (fragment: CodeFragment) => result.fragments.some(old => old.path === fragment.path
     && old.startLine <= fragment.endLine && old.endLine >= fragment.startLine)
-  const vectorShown = new Set<string>()
+  const vectorShown = new Map<string, number>()
   let textBytes = 0
   while (remaining.length) {
     exec.signal.throwIfAborted()
@@ -550,7 +549,7 @@ export async function searchCodeContext(
     if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
     if (index < 0) index = 0
     const unit = remaining.splice(index, 1)[0]
-    if (unit.origin === 'vector' && vectorShown.has(unit.path)) continue
+    if (unit.origin === 'vector' && (vectorShown.get(unit.path) ?? 0) >= 2) continue
     const available = unit.fragments.filter(fragment => !covered(fragment) && !overlaps(fragment))
     // A vector seed must show the fragment that actually intersects its range, not just the declaration head.
     const seedFragment = unit.origin === 'vector' ? available.find(fragment => fragment.seededByVector) : undefined
@@ -562,7 +561,7 @@ export async function searchCodeContext(
       mark('result context omitted by fragment/text budget'); continue
     }
     textBytes += size; result.fragments.push(...additions); represented.add(unit.path)
-    if (unit.origin === 'vector') vectorShown.add(unit.path)
+    if (unit.origin === 'vector') vectorShown.set(unit.path, (vectorShown.get(unit.path) ?? 0) + 1)
     result.vectorSeededFragments += additions.filter(fragment => fragment.seededByVector).length
     result.seedCoveredFragments += additions.filter(fragment => fragment.seedCoverage === 'full').length
   }
