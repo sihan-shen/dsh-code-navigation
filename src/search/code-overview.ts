@@ -32,10 +32,8 @@ export function overviewNodeHint(setup: OverviewSetup): string {
 }
 
 export async function getCodeOverview(fs: FileSystem, input: SemanticIndexConfig,
-  args: CodeOverviewQuery, exec: IndexExecution): Promise<CodeOverviewResult> {
-  const setup = resolveOverviewSetup(input), view = args.view ?? 'summary', id = args.node ?? setup.rootId
-  if (view !== 'summary' && view !== 'source') throw new Error('overview view must be summary or source')
-  if (typeof id !== 'string') throw new Error('overview node must be a configured id')
+  args: CodeOverviewQuery, exec: IndexExecution, resolved?: OverviewSetup): Promise<CodeOverviewResult> {
+  const setup = resolved ?? resolveOverviewSetup(input), view = args.view ?? 'summary', id = args.node ?? setup.rootId
   const node = setup.nodes.find(node => node.id === id)
   if (!node) throw new Error(`unknown overview node. ${overviewNodeHint(setup)}`)
   const location = await snapshotLocation(fs, exec), { snapshot, info } = await loadSnapshot(fs, setup.semantic, location)
@@ -81,7 +79,8 @@ export async function getCodeOverview(fs: FileSystem, input: SemanticIndexConfig
     result.limits.push('Source view samples consecutive chunks round-robin from file starts; it is not a question-optimized retrieval baseline or a full subsystem view.')
     if (omitted) result.limits.push(`${omitted} source ranges omitted by the shared 8 KiB / 96-line budget.`)
   }
-  await verifyOverviewBase(fs, location, snapshot, info.version)
-  if (loaded && (await fs.stat(loaded.target, location.signal))?.version !== loaded.version) throw new Error('overviews changed during query')
+  if (loaded) {
+    if ((await fs.stat(loaded.target, location.signal))?.version !== loaded.version) throw new Error('overviews changed during query')
+  } else await verifyOverviewBase(fs, location, snapshot, info.version)
   return result
 }

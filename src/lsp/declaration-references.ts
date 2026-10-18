@@ -1,9 +1,10 @@
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import type { LspService, LspLocation } from '@deepseek-ai/dsh-lsp'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { extractDeclarations } from '../ast/typescript-declarations.js'
+import { extractDeclarations, isDeclarationName } from '../ast/typescript-declarations.js'
 import type { Declaration } from '../ast/typescript-declarations.js'
 import { referenceContextLines } from '../ast/typescript-reference-context.js'
+import { isWorkspaceRelativePath } from '../workspace-path.js'
 
 const MAX_FILE_BYTES = 128 * 1024
 const MAX_TOTAL_BYTES = 512 * 1024
@@ -41,8 +42,7 @@ function workspacePath(uri: string, rootUri: string): string | undefined {
     if (target.protocol !== 'file:' || root.protocol !== 'file:' || target.host !== root.host
       || target.search || target.hash || !target.pathname.startsWith(prefix)) return undefined
     const path = decodeURIComponent(target.pathname.slice(prefix.length))
-    if (!path || path.startsWith('/') || path.includes('\\') || path.split('/').some(part => part === '..')) return undefined
-    return path
+    return isWorkspaceRelativePath(path) ? path : undefined
   } catch { return undefined }
 }
 
@@ -50,12 +50,8 @@ export async function findDeclarationReferences(
   fs: FileSystem, lsp: LspService, args: { file_path: string; name: string }, exec: ToolExecution,
 ): Promise<ReferenceResult> {
   const path = args.file_path
-  if (!path || path.length > 512 || path.startsWith('/') || /^[A-Za-z]:/.test(path)
-    || path.includes('\\') || !/\.ts$/i.test(path)) throw new Error('file_path must be a workspace-relative .ts declaration file')
-  if (!args.name || args.name.length > 128
-    || extractDeclarations('query.ts', `let ${args.name} = 1`, new Set([args.name]), 1).length !== 1) {
-    throw new Error('name must be one exact TS identifier')
-  }
+  if (!isWorkspaceRelativePath(path, /\.ts$/i)) throw new Error('file_path must be a workspace-relative .ts declaration file')
+  if (!isDeclarationName(args.name)) throw new Error('name must be one exact TS identifier')
   const cwd = exec.agent?.session.header.cwd
   if (!cwd) throw new Error('A Harness Session workspace is required')
   const signal = exec.signal

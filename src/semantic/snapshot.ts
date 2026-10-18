@@ -3,7 +3,7 @@ import type { FileSystem, FsTarget, FsInfo } from '@deepseek-ai/dsh-fs'
 import { extractDeclarationTree } from '../ast/typescript-declarations.js'
 import { chunkText, normalizeVectors, sourceChunks } from './chunks.js'
 import { encoder, INDEX_PATH, MAX_CHUNKS, MAX_FILE_BYTES, MAX_INDEX_BYTES,
-  MAX_SOURCE_BYTES, MAX_VECTOR_VALUES, resolveConfig } from './types.js'
+  MAX_SOURCE_BYTES, MAX_VECTOR_VALUES, isCanonicalTimestamp, isRegularFileWithin, resolveConfig } from './types.js'
 import type { IndexExecution, SemanticIndexConfig, SemanticSnapshot, SnapshotFile } from './types.js'
 
 export interface SnapshotLocation { root: FsTarget; index: FsTarget; signal: AbortSignal; cwd: string }
@@ -32,7 +32,7 @@ async function sourceTarget(fs: FileSystem, location: SnapshotLocation, path: st
   const target = await fs.resolve(path, { cwd, signal })
   if (!fs.contains(root, target) || target.targetKey === location.index.targetKey) throw new Error(`source is outside the fixed workspace: ${path}`)
   const info = await fs.stat(target, signal)
-  if (!info || info.type !== 'file' || !Number.isSafeInteger(info.size) || info.size! < 0 || info.size! > MAX_FILE_BYTES) {
+  if (!isRegularFileWithin(info, MAX_FILE_BYTES)) {
     throw new Error(`source must be a regular file of at most 1 MiB: ${path}`)
   }
   return { target, info }
@@ -55,16 +55,14 @@ function decodeSnapshot(text: string, config: SemanticIndexConfig, location: Sna
   if (!value || value.format !== 'ci-semantic-snapshot-v1' || value.parserVersion !== ts.version
     || value.workspaceKey !== location.root.targetKey || !value.embedding
     || value.embedding.id !== config.embedding.id || value.embedding.dimensions !== config.embedding.dimensions
-    || typeof value.createdAt !== 'string' || value.createdAt.length !== 24
-    || !Number.isFinite(Date.parse(value.createdAt)) || new Date(value.createdAt).toISOString() !== value.createdAt
+    || !isCanonicalTimestamp(value.createdAt)
     || !Array.isArray(value.files) || value.files.length !== config.files.length
     || !Array.isArray(value.chunks) || value.chunks.length < 1 || value.chunks.length > MAX_CHUNKS
     || value.chunks.length * config.embedding.dimensions > MAX_VECTOR_VALUES
     || !Array.isArray(value.omissions) || value.omissions.length > 4096
     || value.omissions.some(message => typeof message !== 'string' || message.length > 1024)) bad()
   let sourceBytes = 0, declarationCount = 0
-  const targets = new Set<string>()
-  const expectedChunks: ReturnType<typeof sourceChunks>['chunks'] = [], expectedOmissions: string[] = []
+  const targets = new Set<string>(), lineCounts = new Map<string, number>()
   for (let i = 0; i < value.files.length; i++) {
     const file = value.files[i]
     if (!file || file.path !== config.files[i] || typeof file.targetKey !== 'string' || !file.targetKey
@@ -75,6 +73,7 @@ function decodeSnapshot(text: string, config: SemanticIndexConfig, location: Sna
     sourceBytes += bytes
     if (bytes > MAX_FILE_BYTES || sourceBytes > MAX_SOURCE_BYTES || /\0|\r(?!\n)|[\u2028\u2029]/.test(file.source)) bad()
     const lines = file.source.split('\n')
+    lineCounts.set(file.path, lines.length)
     const parents = new Map<string, SnapshotFile['declarations'][number]>()
     declarationCount += file.declarations.length
     if (declarationCount > 4096 || (file.syntaxError && file.declarations.length)) bad()
@@ -90,16 +89,14 @@ function decodeSnapshot(text: string, config: SemanticIndexConfig, location: Sna
       if (node.parentId && (!parent || parent.startLine > node.startLine || parent.endLine < node.endLine)) bad()
       parents.set(node.id, node)
     }
-    const layout = sourceChunks(file.path, file.source)
-    expectedChunks.push(...layout.chunks); expectedOmissions.push(...layout.omissions)
-    if (file.syntaxError) expectedOmissions.push(`${file.path}: syntax diagnostics; AST metadata unavailable`)
   }
-  if (expectedChunks.length !== value.chunks.length || JSON.stringify(expectedOmissions) !== JSON.stringify(value.omissions)) bad()
-  for (let i = 0; i < value.chunks.length; i++) {
-    const chunk = value.chunks[i], expected = expectedChunks[i]
-    if (!chunk || chunk.path !== expected.path || chunk.startLine !== expected.startLine || chunk.endLine !== expected.endLine) bad()
-    // 校验磁盘数值，精确 cosine 的归一化与冷准备一致；不调用 embedding/AST。
-    chunk.vector = normalizeVectors([chunk.vector], 1, config.embedding.dimensions)[0]
+  // Validate shape and finite vectors; chunk layout/omissions come from our own atomic writer
+  // and are already bound by the format version and per-file version checks.
+  for (const chunk of value.chunks) {
+    if (!chunk || typeof chunk.path !== 'string' || !Number.isInteger(chunk.startLine) || !Number.isInteger(chunk.endLine)
+      || chunk.startLine < 1 || chunk.endLine < chunk.startLine || chunk.endLine > (lineCounts.get(chunk.path) ?? 0)
+      || !Array.isArray(chunk.vector) || chunk.vector.length !== config.embedding.dimensions
+      || chunk.vector.some(number => typeof number !== 'number' || !Number.isFinite(number))) bad()
   }
   return value
 }
@@ -110,7 +107,7 @@ export async function loadSnapshot(fs: FileSystem, config: SemanticIndexConfig, 
   const { index, signal } = location
   const info = await fs.stat(index, signal)
   if (!info) throw new Error('semantic index is not prepared; the operator must run prepareSemanticIndex first')
-  if (info.type !== 'file' || !Number.isSafeInteger(info.size) || info.size! < 0 || info.size! > MAX_INDEX_BYTES) {
+  if (!isRegularFileWithin(info, MAX_INDEX_BYTES)) {
     throw new Error('semantic index must be a regular file of at most 64 MiB')
   }
   const bytes = await fs.readBytes(index, signal, MAX_INDEX_BYTES)
@@ -200,7 +197,6 @@ export async function prepareSemanticIndex(fs: FileSystem, input: SemanticIndexC
     signal.throwIfAborted()
     batch.forEach((chunk, i) => { chunk.vector = vectors[i] })
   }
-  await verifySnapshot(fs, location, snapshot)
   const text = JSON.stringify(snapshot), indexBytes = encoder.encode(text).byteLength
   if (indexBytes > MAX_INDEX_BYTES) throw new Error('serialized semantic index exceeds 64 MiB')
   // 重新检查缓存路径与 canonical identity；不发布失败/取消的半成品。

@@ -1,4 +1,6 @@
+import type { FsInfo } from '@deepseek-ai/dsh-fs'
 import type { DeclarationNode } from '../ast/typescript-declarations.js'
+import { isWorkspaceRelativePath, normalizeWorkspacePath } from '../workspace-path.js'
 import type { SemanticOverviewsConfig } from './overview-types.js'
 
 /** id 必须包括模型修订、pooling、预处理与 query/document 指令版本。 */
@@ -55,11 +57,20 @@ export const MAX_VECTOR_VALUES = 2097152
 export const encoder = new TextEncoder()
 
 export function relativePath(value: string): string {
-  if (typeof value !== 'string' || !value || encoder.encode(value).byteLength > 512 || value.startsWith('/') || /^[A-Za-z]:/.test(value)
-    || /[\\\0\r\n]/.test(value) || value.split('/').includes('..')) {
+  if (!isWorkspaceRelativePath(value) || encoder.encode(value).byteLength > 512) {
     throw new Error('semantic index paths must be workspace-relative without parent traversal')
   }
-  return value.split('/').filter(part => part && part !== '.').join('/') || '.'
+  return normalizeWorkspacePath(value)
+}
+
+/** The single canonical timestamp form accepted in prepared snapshots. */
+export function isCanonicalTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && value.length === 24 && Number.isFinite(Date.parse(value))
+    && new Date(value).toISOString() === value
+}
+
+export function isRegularFileWithin(info: FsInfo | undefined, maxBytes: number): info is FsInfo & { size: number } {
+  return !!info && info.type === 'file' && Number.isSafeInteger(info.size) && info.size! >= 0 && info.size! <= maxBytes
 }
 
 export function resolveConfig(config: SemanticIndexConfig): SemanticIndexConfig {

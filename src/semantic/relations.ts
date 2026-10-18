@@ -4,7 +4,7 @@ import { referenceSites } from '../ast/typescript-reference-sites.js'
 import type { ReferenceSite } from '../ast/typescript-reference-sites.js'
 import { loadSnapshot, snapshotLocation, verifySnapshot } from './snapshot.js'
 import type { SnapshotLocation } from './snapshot.js'
-import { encoder, resolveConfig } from './types.js'
+import { encoder, isCanonicalTimestamp, isRegularFileWithin, resolveConfig } from './types.js'
 import type { IndexExecution, RelationAnchor, SemanticIndexConfig, SemanticSnapshot } from './types.js'
 
 const RELATIONS_PATH = '.code-navigation/semantic-relations.json'
@@ -75,7 +75,7 @@ export async function loadRelations(fs: FileSystem, config: SemanticIndexConfig,
   if (!config.relations) throw new Error('semantic relations are not configured')
   const target = await relationTarget(fs, location), info = await fs.stat(target, location.signal)
   if (!info) throw new Error('semantic relations are not prepared; the operator must run prepareSemanticRelations first')
-  if (info.type !== 'file' || !Number.isSafeInteger(info.size) || info.size! < 0 || info.size! > MAX_BYTES) {
+  if (!isRegularFileWithin(info, MAX_BYTES)) {
     throw new Error('semantic relations exceed 512 KiB or are not a regular file')
   }
   const bytes = await fs.readBytes(target, location.signal, MAX_BYTES)
@@ -85,12 +85,20 @@ export async function loadRelations(fs: FileSystem, config: SemanticIndexConfig,
   try { relations = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { return bad() }
   if (!relations || relations.format !== 'ci-semantic-relations-v1' || relations.indexVersion !== indexVersion
     || relations.workspaceKey !== snapshot.workspaceKey || JSON.stringify(relations.config) !== JSON.stringify(config.relations)
-    || typeof relations.createdAt !== 'string' || relations.createdAt.length !== 24
-    || !Number.isFinite(Date.parse(relations.createdAt)) || new Date(relations.createdAt).toISOString() !== relations.createdAt
+    || !isCanonicalTimestamp(relations.createdAt)
     || !Array.isArray(relations.anchors) || relations.anchors.length !== config.relations.anchors.length
     || !Array.isArray(relations.environment) || relations.environment.length !== config.relations.environmentFiles.length) bad()
-  // 磁盘角色/容器不作为可信语法；从固定原文复核，不执行 LSP 或 embedding。
-  const sites = new Map(snapshot.files.map(file => [file.path, referenceSites(file.path, file.source)]))
+  // 磁盘角色/容器不作为可信语法；只复核实际引用的文件，不执行 LSP 或 embedding。
+  const siteCache = new Map<string, Map<string, ReferenceSite>>()
+  const sitesFor = (path: string): Map<string, ReferenceSite> => {
+    let sites = siteCache.get(path)
+    if (!sites) {
+      const file = snapshot.files.find(file => file.path === path)
+      sites = file ? referenceSites(file.path, file.source) : new Map()
+      siteCache.set(path, sites)
+    }
+    return sites
+  }
   for (let i = 0; i < relations.anchors.length; i++) {
     const entry = relations.anchors[i], anchor = config.relations.anchors[i], { file, node } = anchorTarget(snapshot, anchor)
     if (!entry || JSON.stringify(entry.anchor) !== JSON.stringify(anchor) || entry.targetId !== node.id
@@ -102,7 +110,7 @@ export async function loadRelations(fs: FileSystem, config: SemanticIndexConfig,
       if (!ref || Object.keys(ref).sort().join(',') !== 'character,containerId,endCharacter,line,path,role,sourceVersion,targetId,targetVersion'
         || !Number.isInteger(ref.line) || !Number.isInteger(ref.character) || !Number.isInteger(ref.endCharacter)) bad()
       const source = snapshot.files.find(file => file.path === ref.path)
-      const site = sites.get(ref.path)?.get(`${ref.line}:${ref.character}`)
+      const site = sitesFor(ref.path).get(`${ref.line}:${ref.character}`)
       const key = `${ref.path}:${ref.line}:${ref.character}`
       if (!source || !site || ref.sourceVersion !== source.version || ref.targetId !== node.id
         || ref.targetVersion !== file.version || ref.endCharacter !== site.endCharacter

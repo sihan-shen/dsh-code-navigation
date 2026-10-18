@@ -1,7 +1,9 @@
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { extractDeclarations } from '../ast/typescript-declarations.js'
+import { extractDeclarations, isDeclarationName } from '../ast/typescript-declarations.js'
 import type { Declaration } from '../ast/typescript-declarations.js'
+import { literalPattern } from './literal-pattern.js'
+import { isWorkspaceRelativePath } from '../workspace-path.js'
 
 const MAX_FILES = 20
 const MAX_NAMES = 8
@@ -20,9 +22,7 @@ function validateNames(names: string[]): ReadonlySet<string> {
   if (names.length < 1 || names.length > MAX_NAMES) throw new Error(`names must contain 1–${MAX_NAMES} identifiers`)
   const unique = new Set<string>()
   for (const name of names) {
-    if (name.length === 0 || name.length > 128) throw new Error('each name must contain 1–128 characters')
-    const found = extractDeclarations('query.ts', `let ${name} = 1`, new Set([name]), 1)
-    if (found.length !== 1) throw new Error(`name must be one valid TS/JS identifier: ${name}`)
+    if (!isDeclarationName(name)) throw new Error(`name must be one valid TS/JS identifier: ${name}`)
     unique.add(name)
   }
   return unique
@@ -32,8 +32,7 @@ function validateFiles(files: string[]): string[] {
   if (files.length < 1 || files.length > MAX_FILES) throw new Error(`files must contain 1–${MAX_FILES} paths`)
   const unique = new Set<string>()
   for (const path of files) {
-    if (!path || path.length > 512 || path.startsWith('/') || /^[A-Za-z]:/.test(path)
-      || path.includes('\\') || !SUPPORTED_FILE.test(path)) {
+    if (!isWorkspaceRelativePath(path, SUPPORTED_FILE)) {
       throw new Error(`unsupported workspace-relative TS/JS path: ${path}`)
     }
     unique.add(path)
@@ -43,7 +42,7 @@ function validateFiles(files: string[]): string[] {
 
 async function discoverFiles(tools: ToolRuntime, names: ReadonlySet<string>, exec: ToolExecution): Promise<string[]> {
   if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable; provide candidate files')
-  const pattern = [...names].map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const pattern = literalPattern(names)
   const outcome = await tools.execute({
     callId: `${exec.callId}:grep` as typeof exec.callId,
     rootCallId: exec.rootCallId,
@@ -100,15 +99,25 @@ export async function findDeclarations(
       result.skipped.push({ path, reason: info.size === undefined ? 'size unknown' : 'file exceeds 1 MiB' })
       continue
     }
+    let bytes: Uint8Array
+    try {
+      bytes = await fs.readBytes(target, exec.signal, MAX_FILE_BYTES)
+    } catch {
+      exec.signal.throwIfAborted()
+      result.skipped.push({ path, reason: 'read failed' })
+      continue
+    }
     let source: string
     try {
-      const bytes = await fs.readBytes(target, exec.signal, MAX_FILE_BYTES)
       // Preserve BOM so syntax coordinates stay aligned with the original file.
       source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
-      if (source.includes('\0')) throw new Error('binary content')
-    } catch (error) {
+    } catch {
       exec.signal.throwIfAborted()
-      result.skipped.push({ path, reason: error instanceof Error && error.message === 'binary content' ? 'binary content' : 'read failed' })
+      result.skipped.push({ path, reason: 'decode failed' })
+      continue
+    }
+    if (source.includes('\0')) {
+      result.skipped.push({ path, reason: 'binary content' })
       continue
     }
     result.filesScanned++

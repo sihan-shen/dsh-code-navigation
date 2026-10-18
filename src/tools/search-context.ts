@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { searchCodeContext, type SemanticQueryCache } from '../search/code-context-search.js'
 import type { ContextResult } from '../search/code-context-search.js'
+import { resolveConfig } from '../semantic/types.js'
 import type { SemanticIndexConfig } from '../semantic/types.js'
 
 export function renderCodeContext(value: ContextResult): string {
@@ -83,7 +84,8 @@ export function renderCodeContext(value: ContextResult): string {
 // Session-scoped, bounded seed reuse; an index rebuild is expected to start a new session.
 const semanticCaches = new WeakMap<object, SemanticQueryCache>()
 
-export function registerSearchContextTool(ctx: Context, semantic?: SemanticIndexConfig): void {
+export function registerSearchContextTool(ctx: Context, input?: SemanticIndexConfig): void {
+  const semantic = input ? resolveConfig(input) : undefined
   const hybrid = semantic !== undefined
   const basePrompt = 'When TS/JS search needs surrounding implementation source, use nav_search_context instead of separate grep plus ordinary read of matching files. Supply literal terms when known. The tool keeps lexical declarations/anchors first. Reuse numbered fragments and anchors; read only missing branches or dependencies. The first vector card is the primary evidence card; later cards are supporting pointers. Use the primary card first, and open a supporting card only for a specific missing fact. Check term coverage for terms without selected fragments before refining. Use available declaration or native LSP tools only for unresolved identity, type or relationship questions. An unchanged empty query adds no evidence; refine it or stop when the required facts are covered.'
   const hybridPrompt = ' When a prepared semanticIndex is configured, also pass a natural-language query with mode hybrid for concept recall; vector-seeded source is re-read from the current workspace and is not semantic proof.'

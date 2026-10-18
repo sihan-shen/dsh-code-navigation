@@ -76,6 +76,12 @@ export function extractDeclarationTree(path: string, source: string): {
   return { declarations, syntaxError }
 }
 
+/** Syntax-check one exact declaration name without a separate parser policy. */
+export function isDeclarationName(name: string): boolean {
+  if (!name || name.length > 128) return false
+  return extractDeclarations('query.ts', `let ${name} = 1`, new Set([name]), 1).length === 1
+}
+
 export function extractDeclarations(path: string, source: string, names: ReadonlySet<string>, limit: number): Declaration[] {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
   const lineStarts = file.getLineStarts()

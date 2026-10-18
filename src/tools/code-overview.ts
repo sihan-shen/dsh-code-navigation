@@ -30,9 +30,6 @@ export function renderCodeOverview(value: CodeOverviewResult): string {
 
 export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfig): void {
   const setup = resolveOverviewSetup(input)
-  const nodes = setup.nodes.map(node => Object.freeze({ id: node.id, label: node.label,
-    ...(node.children.length ? { children: node.children } : { files: node.files }) }))
-  const config = { ...setup.semantic, overviews: Object.freeze({ generator: setup.generator, nodes: Object.freeze(nodes) }) }
   const nodeIds = setup.nodes.map(node => node.id), nodeHint = overviewNodeHint(setup)
   ctx.inject(['systemPrompt'], scoped => {
     scoped.systemPrompt.section({ name: 'tool:nav_get_code_overview', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 3,
@@ -66,7 +63,7 @@ export function registerCodeOverviewTool(ctx: Context, input: SemanticIndexConfi
       limits: { type: 'array', required: true, items: string },
     } }, render: (_args, value) => [{ type: 'text', text: renderCodeOverview(value) }] },
     timeoutMs: 30000, isConcurrencySafe: () => true,
-    execute: (args, exec) => getCodeOverview(ctx.fs, config, args,
-      { cwd: exec.agent?.session.header.cwd ?? '', signal: exec.signal }),
+    execute: (args, exec) => getCodeOverview(ctx.fs, setup.semantic, args,
+      { cwd: exec.agent?.session.header.cwd ?? '', signal: exec.signal }, setup),
   }))
 }

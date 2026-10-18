@@ -1,7 +1,7 @@
 import type { FileSystem, FsTarget } from '@deepseek-ai/dsh-fs'
 import { loadSnapshot, snapshotLocation, verifySnapshot } from './snapshot.js'
 import type { SnapshotLocation } from './snapshot.js'
-import { encoder } from './types.js'
+import { encoder, isCanonicalTimestamp, isRegularFileWithin } from './types.js'
 import type { IndexExecution, SemanticIndexConfig, SemanticSnapshot } from './types.js'
 import { exactOverviewKeys, overviewNumber, overviewText, resolveOverviewSetup,
   MAX_OVERVIEW_BYTES, MAX_OVERVIEW_INPUT_BYTES, OVERVIEWS_PATH, OVERVIEW_INSTRUCTION } from './overview-types.js'
@@ -84,15 +84,14 @@ export async function loadOverviews(fs: FileSystem, setup: OverviewSetup, locati
   snapshot: SemanticSnapshot, indexVersion: string) {
   const target = await overviewTarget(fs, location), info = await fs.stat(target, location.signal)
   if (!info) throw new Error('overviews are not prepared; the operator must run prepareSemanticOverviews first')
-  if (info.type !== 'file' || !overviewNumber(info.size) || info.size > MAX_OVERVIEW_BYTES) throw new Error('overviews exceed 256 KiB or are not a regular file')
+  if (!isRegularFileWithin(info, MAX_OVERVIEW_BYTES)) throw new Error('overviews exceed 256 KiB or are not a regular file')
   const bytes = await fs.readBytes(target, location.signal, MAX_OVERVIEW_BYTES)
   if ((await fs.stat(target, location.signal))?.version !== info.version) throw new Error('overviews changed while being read')
   const value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as OverviewsSnapshot
   const bad = (): never => { throw new Error('overviews invalid/stale/incompatible; run prepareSemanticOverviews with rebuild: true') }
   if (!exactOverviewKeys(value, ['format', 'workspaceKey', 'indexVersion', 'generatorId', 'createdAt', 'nodes'])
     || value.format !== 'ci-code-overviews-v1' || value.workspaceKey !== snapshot.workspaceKey || value.indexVersion !== indexVersion
-    || value.generatorId !== setup.generator.id || typeof value.createdAt !== 'string' || value.createdAt.length !== 24
-    || !Number.isFinite(Date.parse(value.createdAt)) || new Date(value.createdAt).toISOString() !== value.createdAt
+    || value.generatorId !== setup.generator.id || !isCanonicalTimestamp(value.createdAt)
     || !Array.isArray(value.nodes) || value.nodes.length !== setup.order.length) bad()
   const previous = new Map<string, StoredOverview>()
   for (let i = 0; i < value.nodes.length; i++) {
@@ -104,8 +103,8 @@ export async function loadOverviews(fs: FileSystem, setup: OverviewSetup, locati
       || !Number.isFinite(entry.generation.elapsedMs) || entry.generation.elapsedMs < 0) bad()
     const children = node.children.map(id => previous.get(id)!)
     const generated = validateGenerated({ claims: entry.claims, limitations: entry.limitations, usage: entry.usage }, node, snapshot, children)
-    const inputBytes = encoder.encode(JSON.stringify(requestFor(node, snapshot, children))).byteLength
-    if (inputBytes > MAX_OVERVIEW_INPUT_BYTES || entry.generation.inputBytes !== inputBytes
+    // Stored inputBytes is cost metadata; recomputing it would reserialize every source on each query.
+    if (!overviewNumber(entry.generation.inputBytes) || entry.generation.inputBytes > MAX_OVERVIEW_INPUT_BYTES
       || entry.generation.outputBytes !== encoder.encode(JSON.stringify(generated)).byteLength) bad()
     previous.set(node.id, entry)
   }
@@ -114,11 +113,6 @@ export async function loadOverviews(fs: FileSystem, setup: OverviewSetup, locati
   return { overviews: value, bytes: bytes.byteLength, target, version: info.version }
 }
 
-function freezeRequest(value: unknown): void {
-  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return
-  for (const part of Object.values(value)) freezeRequest(part)
-  Object.freeze(value)
-}
 async function generate(setup: OverviewSetup, request: OverviewRequest, signal: AbortSignal): Promise<GeneratedOverview> {
   signal.throwIfAborted()
   let abort: () => void = () => {}
@@ -158,12 +152,13 @@ export async function prepareSemanticOverviews(fs: FileSystem, input: SemanticIn
     const children = node.children.map(id => value.nodes.find(child => child.id === id)!)
     const request = requestFor(node, snapshot, children), inputBytes = encoder.encode(JSON.stringify(request)).byteLength
     if (inputBytes > MAX_OVERVIEW_INPUT_BYTES) throw new Error(`overview input exceeds 64 KiB: ${node.id}; narrow/split the explicit group`)
-    freezeRequest(request)
     const before = performance.now(), output = validateGenerated(await generate(setup, request, signal), node, snapshot, children)
     signal.throwIfAborted()
     value.nodes.push({ ...node, ...output, generation: { inputBytes,
       outputBytes: encoder.encode(JSON.stringify(output)).byteLength, elapsedMs: performance.now() - before } })
-    await verifyOverviewBase(fs, location, snapshot, info.version)
+    if ((await fs.stat(location.index, signal))?.version !== info.version) {
+      throw new Error('base semantic index changed; rebuild overviews explicitly')
+    }
   }
   const text = JSON.stringify(value), bytes = encoder.encode(text).byteLength
   if (bytes > MAX_OVERVIEW_BYTES) throw new Error('overviews exceed 256 KiB')

@@ -7,6 +7,7 @@ import { lineSymbolCandidates } from '../ast/typescript-line-symbol.js'
 import { CONTINUATION_SELECTORS, parseDefinitionSource, definitionIdentity, selectContinuation } from '../ast/typescript-continuation.js'
 import type { ContinuationSelector } from '../ast/typescript-continuation.js'
 import { extractDeclarations } from '../ast/typescript-declarations.js'
+import { isWorkspaceRelativePath } from '../workspace-path.js'
 
 export const DEFINITION_LIMITS = {
   queries: 8, targets: 3, fileBytes: 65536, totalBytes: 393216,
@@ -80,9 +81,7 @@ function workspacePath(uri: string, rootUri: string): string | undefined {
     if (root.protocol !== 'file:' || target.protocol !== 'file:' || target.host !== root.host
       || target.search || target.hash || !target.pathname.startsWith(prefix)) return undefined
     const path = decodeURIComponent(target.pathname.slice(prefix.length))
-    if (!path || path.startsWith('/') || path.includes('\\') || path.includes('\0')
-      || path.split('/').some(part => part === '..') || !/\.ts$/i.test(path)) return undefined
-    return path
+    return isWorkspaceRelativePath(path, /\.ts$/i) ? path : undefined
   } catch { return undefined }
 }
 
@@ -93,17 +92,16 @@ function failureMessage(error: unknown): string {
 export async function findBatchDefinitions(
   fs: FileSystem, lsp: LspService, args: { queries: DefinitionCursor[] }, exec: ToolExecution,
 ): Promise<BatchDefinitions> {
-  if (!Array.isArray(args.queries) || args.queries.length < 1 || args.queries.length > DEFINITION_LIMITS.queries) {
+  if (args.queries.length < 1 || args.queries.length > DEFINITION_LIMITS.queries) {
     throw new Error('queries must contain 1–8 cursors')
   }
   for (const q of args.queries) {
-    if (!q || typeof q.file_path !== 'string' || !q.file_path || q.file_path.length > 512
-      || q.file_path.includes('\0') || !/\.ts$/i.test(q.file_path)
-      || q.expected_symbol !== undefined && (typeof q.expected_symbol !== 'string' || !q.expected_symbol || q.expected_symbol.length > 120)
-      || q.follow !== undefined && (!Array.isArray(q.follow) || q.follow.length > 2 || q.follow.some(step => !CONTINUATION_SELECTORS.includes(step)))
+    if (!isWorkspaceRelativePath(q.file_path, /\.ts$/i)
+      || q.expected_symbol !== undefined && (!q.expected_symbol || q.expected_symbol.length > 120)
+      || q.follow !== undefined && (q.follow.length > 2 || q.follow.some(step => !CONTINUATION_SELECTORS.includes(step)))
       || !Number.isSafeInteger(q.line) || q.line < 1
       || (q.symbol === undefined ? !Number.isSafeInteger(q.character) || q.character! < 1
-        : typeof q.symbol !== 'string' || !q.symbol || q.symbol.length > 120 || q.character !== undefined)) {
+        : !q.symbol || q.symbol.length > 120 || q.character !== undefined)) {
       throw new Error('Require a .ts path, positive line, and exactly one of positive UTF-16 character or symbol')
     }
   }
@@ -114,17 +112,13 @@ export async function findBatchDefinitions(
   const root = await fs.resolve('.', { cwd, signal })
   const rootUri = fs.fileUrl(root)
   const texts = new Map<FsTarget['targetKey'], Source>()
+  const sourceTargets = new Map<FsTarget['targetKey'], FsTarget>()
   let remaining: number = DEFINITION_LIMITS.totalBytes, bytesRead = 0
 
   async function source(target: FsTarget): Promise<Source> {
     signal.throwIfAborted()
     const cached = texts.get(target.targetKey)
-    if (cached) {
-      if ((await fs.stat(target, signal))?.version !== cached.version) {
-        throw new Error('Source changed during navigation; retry with current coordinates')
-      }
-      return cached
-    }
+    if (cached) return cached
     const cap = Math.min(DEFINITION_LIMITS.fileBytes, remaining)
     if (cap <= 0) throw new Error('[source_budget_exhausted] remaining_bytes=0; retryable=false for this batch. Reuse collected evidence; use native lsp if available or focused read/grep only for remaining claims.')
     const before = await fs.stat(target, signal)
@@ -151,6 +145,7 @@ export async function findBatchDefinitions(
     const sha256 = Array.from(hash, byte => byte.toString(16).padStart(2, '0')).join('')
     const value = { version: before.version, text, lines: text.split(/\r\n|\n|\r/), sha256 }
     texts.set(target.targetKey, value)
+    sourceTargets.set(target.targetKey, target)
     return value
   }
 
@@ -304,7 +299,7 @@ export async function findBatchDefinitions(
             evidenceNotes: syntax?.notes ?? [],
             relation: self ? 'self' : 'definition',
           })
-          if ((selector || automatic) && !self) {
+          if (q.follow?.length !== 0 && !self) {
             const selections = (selector ? [selector] : [...CONTINUATION_SELECTORS]).map(step => ({ step, result: selectContinuation(parsed, start.line + 1, start.character + 1, step) })).filter(s => s.result.supported)
             const bodiesHere = new Set(selections.map(s => s.result.bodyKey))
             for (const body of bodiesHere) bodies.add(`${canonicalPath}:${body}`)
@@ -314,7 +309,6 @@ export async function findBatchDefinitions(
             const { step, result: selection } = matched[0]
             if (selectedSelector && selectedSelector !== step) unsupported = true
             selectedSelector = step
-            if (!selection.supported) unsupported = true
             const body = `${canonicalPath}:${selection.bodyKey}`
             if (!processed.has(body)) {
               processed.add(body); bodies.add(body)
@@ -355,6 +349,12 @@ export async function findBatchDefinitions(
     if (waveStart === cursors.length) break
   }
   signal.throwIfAborted()
+  // Check each read file once at the end instead of re-statting it on every cached access.
+  for (const [key, value] of texts) {
+    if ((await fs.stat(sourceTargets.get(key)!, signal))?.version !== value.version) {
+      throw new Error('Source changed during navigation; retry with current coordinates')
+    }
+  }
   return { items: responses.map(r => r.item), lspQueries, bytesRead, sourceRows,
     omittedTargets: responses.reduce((n, r) => n + r.item.omitted, 0) }
 }

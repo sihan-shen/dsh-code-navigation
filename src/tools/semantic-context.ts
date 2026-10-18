@@ -80,6 +80,6 @@ export function registerSemanticContextTool(ctx: Context, input: SemanticIndexCo
     timeoutMs: 30000,
     isConcurrencySafe: () => true,
     execute: (args, exec) => searchSemanticContext(ctx.fs, config, args,
-      { cwd: exec.agent?.session.header.cwd ?? '', signal: exec.signal }),
+      { cwd: exec.agent?.session.header.cwd ?? '', signal: exec.signal }, config),
   }))
 }

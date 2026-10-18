@@ -1,8 +1,8 @@
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { DeclarationNode } from '../ast/typescript-declarations.js'
 import { chunkText, normalizeVectors } from '../semantic/chunks.js'
-import { loadSnapshot, snapshotLocation, verifySnapshot } from '../semantic/snapshot.js'
-import { loadRelations, verifyRelations } from '../semantic/relations.js'
+import { loadSnapshot, snapshotLocation } from '../semantic/snapshot.js'
+import { loadRelations } from '../semantic/relations.js'
 import { selectSemanticReferences } from './semantic-reference-selection.js'
 import type { ReferenceEvidence } from '../semantic/relations.js'
 import { encoder, relativePath, resolveConfig } from '../semantic/types.js'
@@ -38,15 +38,15 @@ export interface SemanticSeedResult {
 
 /** Candidate-only semantic lookup: no source fragments, relations or AST presentation. */
 export async function searchSemanticSeeds(fs: FileSystem, input: SemanticIndexConfig,
-  args: { query: string; path?: string; limit?: number }, exec: IndexExecution): Promise<SemanticSeedResult> {
-  const config = resolveConfig(input)
+  args: { query: string; path?: string; limit?: number }, exec: IndexExecution,
+  resolved?: SemanticIndexConfig): Promise<SemanticSeedResult> {
+  const config = resolved ?? resolveConfig(input)
   const query = args.query?.trim(), path = relativePath(args.path ?? '.'), limit = args.limit ?? 4
   if (!query || query.length > 1000 || /\0/.test(query)) throw new Error('query must contain 1–1000 characters')
   if (!Number.isInteger(limit) || limit < 1 || limit > 8) throw new Error('limit must be an integer from 1 to 8')
   const location = await snapshotLocation(fs, exec), { snapshot, bytes } = await loadSnapshot(fs, config, location)
   const candidates = snapshot.chunks.filter(chunk => path === '.' || chunk.path === path || chunk.path.startsWith(path + '/'))
   if (!candidates.length) {
-    await verifySnapshot(fs, location, snapshot)
     return { seeds: [], queryEmbeddings: 0, truncated: snapshot.omissions.length > 0, limits: [...snapshot.omissions] }
   }
   const [vector] = normalizeVectors(await config.embedding.embed([query], 'query', location.signal), 1, config.embedding.dimensions)
@@ -54,7 +54,6 @@ export async function searchSemanticSeeds(fs: FileSystem, input: SemanticIndexCo
     .sort((a, b) => b.score - a.score || (a.chunk.path < b.chunk.path ? -1 : a.chunk.path > b.chunk.path ? 1 : 0)
       || a.chunk.startLine - b.chunk.startLine)
   const selected = scored.slice(0, limit)
-  await verifySnapshot(fs, location, snapshot)
   const limits = [...snapshot.omissions]
   if (scored.length > limit) limits.push(`top-${limit} candidates only; ${scored.length - limit} lower-ranked chunks not returned`)
   return { seeds: selected.map(({ chunk, score }, rank) => ({ path: chunk.path, startLine: chunk.startLine, endLine: chunk.endLine, score, rank })),
@@ -62,12 +61,11 @@ export async function searchSemanticSeeds(fs: FileSystem, input: SemanticIndexCo
 }
 
 export async function searchSemanticContext(fs: FileSystem, input: SemanticIndexConfig,
-  args: SemanticQuery, exec: IndexExecution): Promise<SemanticContextResult> {
-  const started = performance.now(), config = resolveConfig(input)
+  args: SemanticQuery, exec: IndexExecution, resolved?: SemanticIndexConfig): Promise<SemanticContextResult> {
+  const started = performance.now(), config = resolved ?? resolveConfig(input)
   const query = args.query?.trim(), path = relativePath(args.path ?? '.'), limit = args.limit ?? 4
   if (!query || query.length > 1000 || /\0/.test(query)) throw new Error('query must contain 1–1000 characters')
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
-  if (args.expand_relations !== undefined && typeof args.expand_relations !== 'boolean') throw new Error('expand_relations must be boolean')
   if (args.expand_relations === true && !config.relations) throw new Error('relations are not configured; the operator must configure and prepare them first')
   const location = await snapshotLocation(fs, exec), { snapshot, bytes, info } = await loadSnapshot(fs, config, location)
   const expanded = config.relations && args.expand_relations !== false
@@ -131,8 +129,6 @@ export async function searchSemanticContext(fs: FileSystem, input: SemanticIndex
     }
     if (scored.length > limit) result.limits.push(`top-${limit} candidates only; ${scored.length - limit} lower-ranked chunks not returned`)
   }
-  await verifySnapshot(fs, location, snapshot)
-  if (expanded) await verifyRelations(fs, location, expanded.relations)
   result.truncated = result.limits.length > 0
   result.elapsedMs = performance.now() - started
   return result

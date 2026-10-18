@@ -1,6 +1,8 @@
 import { contextDeclarations } from '../ast/typescript-context-ranges.js'
 import { searchSemanticSeeds, type SemanticSeed } from './semantic-context-search.js'
 import type { SemanticIndexConfig } from '../semantic/types.js'
+import { escapeRegExp, literalPattern } from './literal-pattern.js'
+import { isWorkspaceRelativePath, normalizeWorkspacePath } from '../workspace-path.js'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
@@ -70,21 +72,18 @@ export interface ContextResult {
 }
 
 function workspacePath(path: string): string {
-  if (!path || path.length > 512 || path.startsWith('/') || /^[A-Za-z]:/.test(path)
-    || path.includes('\\') || path.includes('\0') || path.split('/').includes('..')) {
+  if (!isWorkspaceRelativePath(path)) {
     throw new Error('path must be a workspace-relative file or directory without parent traversal')
   }
-  return path.split('/').filter(part => part && part !== '.').join('/') || '.'
+  return normalizeWorkspacePath(path)
 }
 
 function validateQuery(args: ContextQuery): { terms: string[]; query?: string; mode: ContextMode; path: string; limit: number } {
   const terms = [...new Set((args.terms ?? []).map(term => term.trim()))]
   const query = args.query?.trim()
   const mode = args.mode ?? 'auto'
-  if (!['auto', 'lexical', 'hybrid'].includes(mode)) throw new Error('mode must be auto, lexical or hybrid')
   if (terms.length === 0 && !query) throw new Error('provide 1–6 literal terms or a natural-language query')
   if (args.terms !== undefined && args.terms.length > 6) throw new Error('terms must contain at most 6 literal search terms')
-  if (args.terms !== undefined && args.terms.length === 0 && !query) throw new Error('terms must contain 1–6 literal search terms')
   if (terms.some(term => term.length < 2 || term.length > 64 || /[\r\n\0]/.test(term)
     || !/[\p{L}\p{N}]/u.test(term))) throw new Error('terms must contain 2–64 characters, including a letter or number')
   if (query !== undefined && (query.length < 1 || query.length > 1000 || /\0/.test(query))) throw new Error('query must contain 1–1000 characters')
@@ -102,10 +101,6 @@ interface SourceHit { line: number; text: string; seed?: VectorSeed }
 interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number; origin: 'lexical' | 'vector' | 'both'; seedRank?: number }
 interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string>; seeds: VectorSeed[] }
 interface Candidate { file: string; entry: CandidateMatches; target: Awaited<ReturnType<FileSystem['resolve']>> }
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
 
 /** A cheap pre-read signal, not a declaration proof. */
 function declarationLike(line: string, term: string): boolean {
@@ -164,7 +159,6 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       : [{ line: hit.line, text: hit.text }]
     for (const item of anchorLines) {
       for (const term of terms) {
-        if (!item.text.includes(term)) continue
         const at = item.text.indexOf(term)
         if (at < 0) continue
         const bom = item.line === 1 && lines[0].startsWith('\uFEFF') && !item.text.startsWith('\uFEFF') ? 1 : 0
@@ -328,7 +322,7 @@ export async function searchCodeContext(
   let matchLimitHit = false
   if (terms.length) {
     if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable')
-    const pattern = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+    const pattern = literalPattern(terms)
     const outcome = await tools.execute({ name: 'grep', arguments: {
       pattern, path, include: '*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}' },
     callId: `${exec.callId}:grep` as typeof exec.callId, rootCallId: exec.rootCallId,
@@ -392,7 +386,7 @@ export async function searchCodeContext(
     } else {
       try {
         vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 8 },
-          { cwd, signal: exec.signal })
+          { cwd, signal: exec.signal }, semantic)
       } catch (error) {
         exec.signal.throwIfAborted()
         const reason = error instanceof Error ? error.message : String(error)
