@@ -532,9 +532,8 @@ export async function searchCodeContext(
     const available = unit.fragments.filter(fragment => !covered(fragment) && !overlaps(fragment))
     // A vector seed must show the fragment that actually intersects its range, not just the declaration head.
     const seedFragment = unit.origin === 'vector' ? available.find(fragment => fragment.seededByVector) : undefined
-    const additions = unit.origin === 'vector'
-      ? (seedFragment ? [seedFragment] : [])
-      : available
+    if (unit.origin === 'vector' && !seedFragment) { mark('vector seed range omitted by fragment budget'); continue }
+    const additions = unit.origin === 'vector' ? [seedFragment!] : available
     if (!additions.length) continue
     const size = additions.reduce((n, fragment) => n + encoder.encode(fragment.text).byteLength, 0)
     if (result.fragments.length + additions.length > limit || textBytes + size > MAX_TEXT_BYTES) {
