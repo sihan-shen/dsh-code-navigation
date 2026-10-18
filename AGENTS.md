@@ -4,6 +4,7 @@
 
 - 根目录 `README.md` 是纳入 Git 的使用说明，仅保留项目介绍、简要架构、构建接入、配置及工具用法。不要在 README 追加开发流水、实现或回滚历史、实验数据与比较、验证执行记录或“已验证与限制”清单；详细工具协议和能力边界维护在现行设计文档，实验结论及已验证/待验证事项写入对应的本地评测资料。
 - `AGENTS.md` 是纳入 Git 的项目约定，保留持续适用的工作规则、授权范围及必要的当前实现约束，不堆叠逐轮开发与评测记录；阶段进度放在 `HANDOFF.md`，详细历史留在本地资料。
+- `README.md` 与 `AGENTS.md` 只描述当前项目状态：旧命名或迁移说明、已废弃的约束、历史授权与评测对比、评测副本中未迁入产品的能力等与现状无关的内容应删除；确需保留的历史写入本地资料或 `HANDOFF.md`，不回写这两个文件。
 - 开发文档统一用中文写作；代码标识符、协议名、命令及必要的技术术语可保留原文。
 - `docs/` 内按类别建文件夹，不在根目录平铺文档。设计放 `docs/design/`，实施计划放 `docs/plans/`，评测记录放 `docs/evaluation/`，决策记录放 `docs/decisions/`；按实际需要创建目录。当前入口是 `docs/design/redevelopment-plan.md`。
 - 旧文档只读归档在 `archive/legacy-2026-10-08/`。不要直接改写归档；需要沿用的决定或证据，在新文档中注明来源和适用范围。
@@ -11,7 +12,7 @@
 - 文档须区分“旧实现现状”“新架构目标”“已验证”“待验证”，不得把方案当成已实现能力，也不得把旧评测推断为新版收益。
 - 涉及 DeepSeek Harness、LSP、语言工具链或依赖的“最新版”时，写明核对日期、准确版本或提交、来源链接；版本变化后重新核验接口与兼容性。
 - DeepSeek Harness 以正式 RC 为支持基线，不将 alpha、beta 或未发布的 `master` 当作基线。当前固定并已验证的接口为 Harness `0.2.0-rc.2`、Cordis `4.0.4`、TypeScript `6.0.3`（记录日期 2026-10-13），不据此声称已核对上游最新版。更新目标 RC 时优先核对官方源码；本地无 `upstream/deepseek-harness/` 时核对固定官方包的公开类型和实际运行，并记录源码核对缺口。
-- `docs/design/redevelopment-plan.md` 是覆盖当前与后续的总体设计：同时说明单插件边界、LSP/AST/RAG 的目标协作方式及分阶段的证据门槛。不要因首版尚未实现后续能力而从总设计中删去它们。
+- `docs/design/redevelopment-plan.md` 是覆盖当前与后续的总体设计：同时说明单插件边界、LSP/AST/RAG 的目标协作方式及分阶段的证据门槛。不要因当前尚未实现后续能力而从总设计中删去它们。
 - 多语言设计与文档按“语言 × 词法/AST/LSP/RAG 能力”记录真实覆盖和限制；新增语言先与该语言的 `rg` 基线比较，不把一种语言的结果外推为全部语言支持。
 - 设计修改应同步更新单一现行入口，必要时在文内记录迁移决策；不要在新旧文档间维护两套相互冲突的规范。
 
@@ -26,13 +27,10 @@
 
 ## 工作范围
 
-- 2026-10-15 用户授权实现图/树讨论的第一阶段，并选择可配置的本地 embedding 接口：允许固定显式 TS/JS 文件集合中的文档向量与 AST 声明包含元数据持久化、显式准备/复用及可选语义查询。此授权不扩展到全仓关系图、摘要树、增量更新、自动模型下载或新外部模型实验。
-- 2026-10-16 用户另行明确要求进入stage3，并选择可配置生成接口：授权在固定快照上显式分组的概览摘要准备/持久复用及查询，不授权自动聚类、全仓扩张、增量、下载或新外部模型额度。新授权优先于历史阶段的“摘要未实现”描述；此前真实Agent阴性结果不改写为摘要收益。
-- 当前已获授权并实现单插件内的最小 AST 声明定位、词法源码检索、窄声明引用查询和前置批量 LSP 定义导航。后续工作以用户当前请求及已有授权为准，不再将旧的“仅 LSP 首阶段”约束当作现状；复用目标 RC 的公开文件、搜索和 LSP 服务，只补齐已确认必要的缺口。
-- AST、LSP、RAG 的后续大规模开发均留待以后，不因进入某阶段自动扩大范围。多语言扩展、广泛语义编排、自建 LSP 生命周期、持久索引、向量召回、缓存及增量更新等须另行提出计划并经用户明确同意；当前保留总体设计目标，不预建这些能力。
-- `../DS-Plugins` 是弃用中的旧工作目录，仅作为只读迁移参考。新实现放在本项目，不回写旧目录。
-- 新项目以单个可直接导入的 Harness 插件包为目标。总体设计覆盖 LSP + AST + RAG；实施时先做可运行的最小实现，与同任务、同仓库的 `rg` 基线比较，有明确改进证据后再投入后续能力。
-- `upstream/deepseek-harness/` 是只读的官方源码检出，供接口核对；不把它或 `../DS-Plugins` 的代码直接当作本项目运行时依赖。
+- 当前授权范围：单插件内的 TypeScript/JavaScript AST 声明定位、词法源码检索（含混合检索）、固定文件语义索引与查询、一跳持久引用、显式分组概览摘要、窄声明引用查询及批量/前置 LSP 定义导航。
+- 全仓关系图、摘要树、自动聚类、自动发现或增量更新、自动模型下载、自建 LSP 生命周期、广泛语义编排、多语言扩展及新外部模型额度均未授权；如需开展须另行提出计划并经用户明确同意。当前保留总体设计目标，不预建这些能力。
+- 项目以单个可直接导入的 Harness 插件包为目标。总体设计覆盖 LSP + AST + RAG；实施时先做可运行的最小实现，与同任务、同仓库的 `rg` 基线比较，有明确改进证据后再投入后续能力。
+- `upstream/deepseek-harness/` 是只读的官方源码检出，供接口核对；不把它的代码直接当作本项目运行时依赖。
 - 优先使用目标 RC 的公开插件和工具接口。只有找到广泛接受、版本无关且满足单插件直接导入的兼容层，并验证适用后，才引入它；不要为假设中的跨版本需求自行构建兼容框架。
 - 未定架构问题先核对目标 RC 的官方实现与公开接口，优先复用已提供的搜索、文件、LSP、存储等能力；官方能力不适配时再评估成熟上游组件，最后才写最小项目实现。区分“复用公开包/API”与“复制官方内部源码”，避免后者形成隐蔽的维护负担。
 - 项目内多步骤开发遵循用户提供的工作、验证及交接要求；编辑子目录前检查更深层 `AGENTS.md`。
@@ -42,7 +40,7 @@
 - 尽可能复用目标 RC 的公开能力、语言官方工具链及经过验证的成熟组件；先查现有接口，再写必要的项目代码。避免复制上游内部实现、重复造搜索/LSP/存储能力，或为假设中的需求增加框架。
 - 按职责组织模块：插件入口只负责装配与注册，语言解析、候选检索、结果整理等分别保持清晰边界；模块通过最小、明确的接口协作。仅在实际出现重复或变化点时抽取共用层，不预建通用框架。
 - `src/index.ts` 是唯一插件入口，只导出 Harness 所需的 `name`、`inject`、`apply` 并装配工具。模型可见工具的参数、输出与渲染放在 `src/tools/`；候选检索、工作区文件约束与结果整理放在 `src/search/`；语言专属语法解析放在 `src/ast/`。当前实现分别位于 `src/tools/find-declarations.ts`、`src/search/declaration-search.ts`、`src/ast/typescript-declarations.ts`。
-- 经独立审核的实验性窄引用查询位于 `src/tools/find-references.ts` 和 `src/lsp/declaration-references.ts`：仅对已知 `.ts` 文件中的唯一精确名称声明执行一次宿主引用查询，并附有界源码；`src/ast/typescript-reference-context.ts` 仅为已读源码补齐最多12行的 import/export 语句上下文，不作语义分类，呈现先保留坐标再填片段；重名不猜选，不做全仓名称搜索或调用层级。插件配置 `enableDeclarationReferences: true` 才启用（默认关闭），通过动态服务注入注册，宿主没有 LSP 服务时保留现有声明工具；服务存在但没有匹配 provider 时如实报错。默认启用须先达到稳定收益与正确性门槛。该引用接入本身不授权多语言、大规模编排、缓存或索引；词法 RAG 属于另行授权的既有能力。
+- 可选窄引用查询位于 `src/tools/find-references.ts` 和 `src/lsp/declaration-references.ts`：仅对已知 `.ts` 文件中的唯一精确名称声明执行一次宿主引用查询，并附有界源码；`src/ast/typescript-reference-context.ts` 仅为已读源码补齐最多12行的 import/export 语句上下文，不作语义分类，呈现先保留坐标再填片段；重名不猜选，不做全仓名称搜索或调用层级。插件配置 `enableDeclarationReferences: true` 才启用（默认关闭），通过动态服务注入注册；宿主没有 LSP 服务时不注册该工具，服务存在但没有匹配 provider 时如实报错。默认启用须先达到稳定收益与正确性门槛。
 - 依赖方向为入口 → 工具 → 检索 → 语言解析；AST 解析模块不依赖 Harness 的工具或文件系统服务。新增 LSP、RAG 或其他语言时按实际职责增设目录和文件，不预建空目录或通用抽象。移动文件时同步调整相对导入、现行设计文档和引用当前源码的记录，保留包入口与工具协议。
 - 保持实现和改动原子化：函数只处理聚焦职责；一次变更解决一个可验证的问题；不要顺手改动无关代码。拆分提交时，每个提交应有完整意图、可独立审查，且不故意留下破损状态。
 - 后续源码与配置用 Git 管理版本；开始实现前确认项目已有可用仓库，否则先初始化或接入约定的仓库。保留有意义的小提交，提交前检查差异与忽略规则；不把生成物、密钥、`upstream/`、`docs/`、`archive/` 或 `HANDOFF.md` 强制纳入跟踪。不擅自覆盖用户改动或改写共享历史。
@@ -50,24 +48,23 @@
 
 ## 当前实现约束
 
-- 概览节点参数枚举实际配置ID，描述附有界id/label/代表路径及真实默认根示例；JSON编码超过256B的代表路径明确省略，不显示无法使用的截断路径，最多8节点的提示小于6KiB。复用目标RC公开enum校验，非法模型调用先由宿主列合法ID；查询层未知节点错误另附目录与示例。不自动别名匹配，不常驻注入完整目录或摘要；该接口修补本身不代表Agent采用或收益已验证。
+- 概览节点参数枚举实际配置ID，描述附有界id/label/代表路径及真实默认根示例；JSON编码超过256B的代表路径明确省略，不显示无法使用的截断路径，最多8节点的提示小于6KiB。复用目标RC公开enum校验，非法模型调用先由宿主列合法ID；查询层未知节点错误另附目录与示例。不自动别名匹配，不常驻注入完整目录或摘要。
 
 - `nav_find_declarations` 默认注册，可通过 `enableFindDeclarations: false` 关闭；`enableCodeContext`、`enableDeclarationReferences`、`enablePrecedingLsp`、`enableToolCooperationPrompt` 全部默认关闭。可选 LSP 工具通过宿主服务动态注入；缺服务不注册，缺 provider 如实报错。提示按 Session 中实际可见工具生成，隐藏工具不留下调用指导。
-- 词法 RAG 位于 `src/tools/search-context.ts`、`src/search/code-context-search.ts`：宿主字面 grep 加有界源码与语法上下文，不是向量、图或树检索。旧离线向量实验不代表运行时能力。候选文件在 12 文件上限前按稀有词/声明形态保留；声明自身超预算时返回 `declaration-partial`（声明头、命中邻域、省略范围），不回退匿名窗口；总结果预算不足仍按原规则省略整个单元并报告。片段带最多 3 个 1-based UTF-16 锚点（match/declaration），结果按术语报告 matchedFiles/matchedLines/selectedFragments/anchorFragments/omittedReason；超过 2000 命中截为部分结果而非硬失败。支持 `.mjs/.cjs/.mts/.cts`；默认仍关闭。配置 `semanticIndex` 时可传可选自然语言 `query` 与 `mode=auto|lexical|hybrid`：向量 seed 保留 `startLine/endLine/rank/score`，同文件词法 hits 与向量范围合并；seed 与相交声明取并集，部分重叠片段裁剪而非整片丢弃；词法声明/锚点优先，最多为 vector-only 文件保留 2 槽，向量片段每文件最多 2 个（仅不同 seed 范围）；hybrid 从 top8 seeds 中跳过同文件重叠范围，pointer 卡带首行。`seededByVector` 只标记与 seed 范围相交的片段，`seedStartLine/seedEndLine` 保留范围；向量片段以导航卡渲染（路径/声明/seed/显示/缺口）；top-1 卡附最多 2KiB 正文，其余卡为 supporting pointer（仅范围/声明/锚点，不含正文），不默认渲染完整正文；结果报告 `vectorStatus/vectorTrigger/vectorOnlyFiles/vectorSeededFragments/seedCoveredFragments`；片段附 `seedCoverage=full|partial`，`full` 表示精确覆盖 seed 范围，提示优先使用该范围而非重读整文件。`auto` 在词法覆盖为空或某 term 无候选时触发；hybrid 有 terms 时 stale/不可用回退词法并标记状态，query-only 仍失败。无索引时不暴露 query/mode。逐文件只捕获 FS/解码失败，不用宽泛 catch 掩盖解析或选择错误。
-- 可选固定文件语义检索位于 `src/tools/semantic-context.ts`、`src/search/semantic-context-search.ts` 和 `src/semantic/`。`semanticIndex` 未配置时不注册；同包 `semantic-index` 子入口显式准备 `.code-navigation/semantic-index.json`，主入口仍仅 name/inject/apply。复用 Harness FS 的 canonical identity、opaque version、有界读取和 guarded atomic write；不做哈希。固定范围/模型身份/解析版本/源码变化须显式整体重建，查询不做文档 embedding；没有持久化查询缓存、自动发现或增量更新；hybrid 的 vector seed 仅在同一 Session 内有界复用（最多 8 条，重建索引应新开会话），不跨 Session。AST 为支持的直接命名声明与最近支持父声明的语法元数据，不推断调用/引用关系。收益尚未通过真实模型或完整 Agent 对照验收。
-- 可选最小持久引用位于 `src/semantic/relations.ts`、`src/ast/typescript-reference-sites.ts`：同一固定源码的1–8个精确声明锚点、公开findReferences、最多24使用点/锚点，单独关系快照绑定索引宿主版本和显式环境版本。查询可选一跳入向引用，固定原向量排序/原8KiB源码与10KiB渲染预算，不执行LSP或文档embedding；角色为语法callee/argument/other，不承诺运行时或唯一重载实现。引用选择按新文件/种子范围外使用点优先，按最早命中种子排名在锚点间轮转，跳过放不下的记录并统计省略；启发式不保证相关性。配置relations才生效，默认产品不变；该引用层本身不含全仓图/摘要或增量。环境文件不等于完整依赖闭包，操作者须维护准确lspId。
-- 可选概览位于 `src/semantic/overview-types.ts`、`overviews.ts`、`src/search/code-overview.ts`、`src/tools/code-overview.ts`。`semanticIndex.overviews`显式配置1–8节点/最多3层/单父有根分组，叶files可跨目录及交叉归属，父只聚合子摘要；不是自动语义聚类/RAPTOR。同包`prepareSemanticOverviews`复用基础快照，每节点一次可配置生成回调、64KiB请求/120秒组合取消；父引文必须来自子摘要，位置有效不代表内容为真。结果1–6声明/每条400B、1–3段引文/每段12行，usage未知用null单列，失败成本由适配器记账。普通路径/guarded atomic write的256KiB独立摘要绑定基础索引宿主版本、工作区、规范分组及generator id；变更显式整体重建，无自动更新。`nav_get_code_overview`默认根摘要/目录，source视图可在没有摘要时读基础快照，确定性文件起始块轮转最多8KiB/96行；不是最优检索基线。两视图10KiB渲染，声明+引文原子省略，所有查询生成/embedding/LSP为0；不配置不注册。摘要是导航线索，不能当作正确性或完整答案证明；实验结论维护在本地评测资料，默认关闭不变。
-- 前置 LSP 位于 `src/tools/batch-definitions.ts`、`src/lsp/batch-definitions.ts`：仅 `.ts` 已见使用点，一次1–8个输入，优先 `line+symbol` 唯一AST标识符选择（`src/ast/typescript-line-symbol.ts`），或旧一基UTF-16 `line+character`，两种模式互斥；零命中/同名歧义不猜列，`expected_symbol` 不匹配不移动光标且保留其他成功项。模型协议省略 `definition_only` 或false自动续查唯一局部语法关系，true仅查即时定义；模型参数不再暴露follow空数组或显式选择器，底层原有有界引擎保留；仅回调new/return this调用/构造器赋值调用/数组裸调用，最多两层四个内部续查记录，真实下级绑定仍由宿主LSP确认（`src/ast/typescript-continuation.ts`），多关系/多位置/多函数体或预算不足即止步。没有通用调用图或广泛语义编排。
-- 批量LSP规范路径相同的精确重复光标去重；每输入最多3个目标，64KiB单文件、384KiB总读取、96个调用内唯一源码行及12000UTF-8渲染字节。重叠源码共享但全部有界目标映射保留；普通17行窗口可补充每段最多12行成员/容器头。保留原始目标坐标与独立语法声明起点、使用点/目标区分、内部项来源、停止原因、完整省略说明和版本校验；外部文件不读，未知语法不猜选。实验未使用的完整块展开/localCalls占位未迁入产品。
-- 批量LSP大小/预算失败区分`file_too_large`、`source_budget_exhausted`，附字节/上限与不可在同条件重试的说明；相对/绝对路径或光标变化不解决文件超限。仅补残余未证事项，可用可见原生LSP/有界文本或直接复用充分证据。非普通文件/无效大小分开报错。未提高读取限额、增加自动回退或改动整输入预验证；后端导航仍先要求完整有界源码。
-- 工具描述及可见性指导按适用证据缺口替代常规read：已知名称的声明身份→AST，有界词法实现片段→源码检索，已见使用点的静态绑定/短链→前置LSP，已知声明的语义引用→引用查询。已有源码足以证明所问身份/种类/位置时直接答，包括简单同文件声明；只有绑定或短链事实仍未证，才从入口已见一个或多个外层锚点导航，内部角色名称/文件/坐标无需先读齐；批量容量不是完整成功要求，工具返回局部续查使用点。定位映射/语法/源码足够即答；后续grep/read仅补未覆盖事实，禁止将工具描述为读齐后的额外确认。前置指导仍是软提示，产品没有实验中的阅读阶段硬守卫、每任务32次查询限制或普通read窗口限制；宿主管理任务资源。没有跨调用缓存、阅读历史去重或自建语言服务器生命周期。不能把实验驱动约束写成插件默认行为。
+- 词法 RAG 位于 `src/tools/search-context.ts`、`src/search/code-context-search.ts`：宿主字面 grep 加有界源码与语法上下文，不是向量、图或树检索。候选文件在 12 文件上限前按稀有词/声明形态保留；声明自身超预算时返回 `declaration-partial`（声明头、命中邻域、省略范围），不回退匿名窗口；总结果预算不足仍按原规则省略整个单元并报告。片段带最多 3 个 1-based UTF-16 锚点（match/declaration），结果按术语报告 matchedFiles/matchedLines/selectedFragments/anchorFragments/omittedReason；超过 2000 命中截为部分结果而非硬失败。支持 `.mjs/.cjs/.mts/.cts`。配置 `semanticIndex` 时可传可选自然语言 `query` 与 `mode=auto|lexical|hybrid`：向量 seed 保留 `startLine/endLine/rank/score`，同文件词法 hits 与向量范围合并；seed 与相交声明取并集，部分重叠片段裁剪而非整片丢弃；词法声明/锚点优先，最多为 vector-only 文件保留 2 槽，向量片段每文件最多 2 个（仅不同 seed 范围）；hybrid 从 top8 seeds 中跳过同文件重叠范围，pointer 卡带首行。`seededByVector` 只标记与 seed 范围相交的片段，`seedStartLine/seedEndLine` 保留范围；向量片段以导航卡渲染（路径/声明/seed/显示/缺口）；top-1 卡附最多 2KiB 正文，其余卡为 supporting pointer（仅范围/声明/锚点，不含正文），不默认渲染完整正文；结果报告 `vectorStatus/vectorTrigger/vectorOnlyFiles/vectorSeededFragments/seedCoveredFragments`；片段附 `seedCoverage=full|partial`，`full` 表示精确覆盖 seed 范围，提示优先使用该范围而非重读整文件。`auto` 在词法覆盖为空或某 term 无候选时触发；hybrid 有 terms 时 stale/不可用回退词法并标记状态，query-only 仍失败。无索引时不暴露 query/mode。逐文件只捕获 FS/解码失败，不用宽泛 catch 掩盖解析或选择错误。
+- 可选固定文件语义检索位于 `src/tools/semantic-context.ts`、`src/search/semantic-context-search.ts` 和 `src/semantic/`。`semanticIndex` 未配置时不注册；同包 `semantic-index` 子入口显式准备 `.code-navigation/semantic-index.json`，主入口仍仅 name/inject/apply。复用 Harness FS 的 canonical identity、opaque version、有界读取和 guarded atomic write；不做哈希。固定范围/模型身份/解析版本/源码变化须显式整体重建，查询不做文档 embedding；没有持久化查询缓存、自动发现或增量更新；hybrid 的 vector seed 仅在同一 Session 内有界复用（最多 8 条，重建索引应新开会话），不跨 Session。AST 为支持的直接命名声明与最近支持父声明的语法元数据，不推断调用/引用关系。
+- 可选最小持久引用位于 `src/semantic/relations.ts`、`src/ast/typescript-reference-sites.ts`：同一固定源码的1–8个精确声明锚点、公开findReferences、最多24使用点/锚点，单独关系快照绑定索引宿主版本和显式环境版本。查询可选一跳入向引用，固定原向量排序/原8KiB源码与10KiB渲染预算，不执行LSP或文档embedding；角色为语法callee/argument/other，不承诺运行时或唯一重载实现。引用选择按新文件/种子范围外使用点优先，按最早命中种子排名在锚点间轮转，跳过放不下的记录并统计省略；启发式不保证相关性。配置 relations 才生效；该引用层本身不含全仓图、摘要或增量。环境文件不等于完整依赖闭包，操作者须维护准确 lspId。
+- 可选概览位于 `src/semantic/overview-types.ts`、`overviews.ts`、`src/search/code-overview.ts`、`src/tools/code-overview.ts`。`semanticIndex.overviews`显式配置1–8节点/最多3层/单父有根分组，叶files可跨目录及交叉归属，父只聚合子摘要；不是自动语义聚类/RAPTOR。同包`prepareSemanticOverviews`复用基础快照，每节点一次可配置生成回调、64KiB请求/120秒组合取消；父引文必须来自子摘要，位置有效不代表内容为真。结果1–6声明/每条400B、1–3段引文/每段12行，usage未知用null单列，失败成本由适配器记账。普通路径/guarded atomic write的256KiB独立摘要绑定基础索引宿主版本、工作区、规范分组及generator id；变更显式整体重建，无自动更新。`nav_get_code_overview`默认根摘要/目录，source视图可在没有摘要时读基础快照，确定性文件起始块轮转最多8KiB/96行。两视图10KiB渲染，声明+引文原子省略，所有查询生成/embedding/LSP为0；不配置不注册。摘要是导航线索，不能当作正确性或完整答案证明。
+- 前置 LSP 位于 `src/tools/batch-definitions.ts`、`src/lsp/batch-definitions.ts`：仅 `.ts` 已见使用点，一次1–8个输入，优先 `line+symbol` 唯一AST标识符选择（`src/ast/typescript-line-symbol.ts`），或一基UTF-16 `line+character`，两种模式互斥；零命中/同名歧义不猜列，`expected_symbol` 不匹配不移动光标且保留其他成功项。模型协议省略 `definition_only` 或false自动续查唯一局部语法关系，true仅查即时定义；模型参数不暴露follow空数组或显式选择器，底层有界引擎保持；仅回调new/return this调用/构造器赋值调用/数组裸调用，最多两层四个内部续查记录，真实下级绑定仍由宿主LSP确认（`src/ast/typescript-continuation.ts`），多关系/多位置/多函数体或预算不足即止步。没有通用调用图或广泛语义编排。
+- 批量LSP规范路径相同的精确重复光标去重；每输入最多3个目标，64KiB单文件、384KiB总读取、96个调用内唯一源码行及12000UTF-8渲染字节。重叠源码共享但全部有界目标映射保留；普通17行窗口可补充每段最多12行成员/容器头。保留原始目标坐标与独立语法声明起点、使用点/目标区分、内部项来源、停止原因、完整省略说明和版本校验；外部文件不读，未知语法不猜选。
+- 批量LSP大小/预算失败区分`file_too_large`、`source_budget_exhausted`，附字节/上限与不可在同条件重试的说明；相对/绝对路径或光标变化不解决文件超限。仅补残余未证事项，可用可见原生LSP/有界文本或直接复用充分证据。非普通文件/无效大小分开报错。后端导航仍先要求完整有界源码。
+- 工具描述及可见性指导按适用证据缺口替代常规read：已知名称的声明身份→AST，有界词法实现片段→源码检索，已见使用点的静态绑定/短链→前置LSP，已知声明的语义引用→引用查询。已有源码足以证明所问身份/种类/位置时直接答，包括简单同文件声明；只有绑定或短链事实仍未证，才从入口已见一个或多个外层锚点导航，内部角色名称/文件/坐标无需先读齐；批量容量不是完整成功要求，工具返回局部续查使用点。定位映射/语法/源码足够即答；后续grep/read仅补未覆盖事实，禁止将工具描述为读齐后的额外确认。前置指导仍是软提示，任务资源由宿主管理。没有跨调用缓存、阅读历史去重或自建语言服务器生命周期；不得把评测驱动的临时约束写成插件默认行为。
 - 默认声明工具的 AST 元数据仅覆盖当前解析器支持的直接命名声明；批量LSP工具另由 `src/ast/typescript-definition-evidence.ts` 在精确目标位置补充constructor、标识符名称的成员/接口签名与命名容器头。未支持的元数据仍须据原文补证，不能由语法身份推断运行时实现。声明首行预览不是完整签名，词法命中不是语义关系，定义片段不是完整行为或调用层级。
-- 当前主产品使用普通目标窗口；重载实现窗口、精简描述和首次选择点强化指导仍只存在于评测副本，不得当作当前产品能力。
 - 绑定证据协议保留 `sourceSymbol/sourceRole` 和目标 `relation=self/definition`，按准确光标语法及目标范围描述，不把声明点当另一使用点证明，不把 unknown kind 当绑定失败。
 
 ## 评测与续接
 
 - 每个评测使用独立 `docs/evaluation/<实验名>/` 文件夹，保存输入/配置/源码与构建副本、版本清单、驱动、原始记录、评分及报告，明确模型、样本、重复次数、工具可见性、提示和预算。区分纯 `rg` 与含默认 AST 的文本基线；区分目标定位正确与完整答案严格正确。
 - 修改产品后，旧冻结驱动与当前源码/构建可能不再匹配；不得直接套用旧冻结材料重跑新产品，也不得改写旧哈希掩盖变化。新实验重新冻结合同，旧结论注明适用版本。
-- 外部模型实验遵循已有授权的凭据、语料、模型和预算范围；继续前核对累计账本、未知 usage 预留与本轮冻结合同。已完成运行不重启或自动补格，预算耗尽不自动沿用；文档维护不触发模型请求。记录可见调用轨迹；2026-10-15起按用户要求，后续新实验还须原样保存提供方显式返回的 thinking/reasoning 内容，按格与请求/step关联，包含宿主已结算的失败或中断前缀，未返回或未捕获须如实区分，不编造未返回的内部决策链。使用公开宿主事件旁路记录，不改模型请求/回放或写入认证信息；在新轮冻结前接入并核对覆盖，不改写旧冻结记录或为补thinking重跑完成格。当前接入说明与最小记录器见本地 `docs/evaluation/recording/`。
+- 外部模型实验遵循已有授权的凭据、语料、模型和预算范围；继续前核对累计账本、未知 usage 预留与本轮冻结合同。已完成运行不重启或自动补格，预算耗尽不自动沿用；文档维护不触发模型请求。记录可见调用轨迹；新实验还须原样保存提供方显式返回的 thinking/reasoning 内容，按格与请求/step关联，包含宿主已结算的失败或中断前缀，未返回或未捕获须如实区分，不编造未返回的内部决策链。使用公开宿主事件旁路记录，不改模型请求/回放或写入认证信息；在新轮冻结前接入并核对覆盖，不改写旧冻结记录或为补thinking重跑完成格。当前接入说明与最小记录器见本地 `docs/evaluation/recording/`。
 - 多步骤项目工作结束前更新本地 `HANDOFF.md`，只保留当前状态、重要决定、相关文件、实际验证、阻塞及下一步；详细历史保留在评测资料中，不持续追加聊天式流水账。

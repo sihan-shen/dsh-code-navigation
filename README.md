@@ -4,8 +4,6 @@ Code navigation and retrieval toolkit for DeepSeek Harness.
 
 本项目是一个单包 Cordis 插件：默认提供 TypeScript/JavaScript 语法声明定位；按需启用词法 RAG、固定文件语义索引、Hybrid 词法+向量检索、子系统概览、声明引用和批量 LSP 定义导航。所有检索工具只负责召回和整理源码证据，不调用生成模型；是否使用字面搜索、AST、向量或 LSP 由工具与配置显式区分。
 
-包名和仓库名均为 `dsh-code-navigation`；当前本地检出目录可能仍保留旧目录名，克隆/发布时应使用 `dsh-code-navigation`。`package.json` 的 `description` 与上面的 Short Description 一致。
-
 ## Table of Contents
 
 - [Security](#security)
@@ -41,17 +39,6 @@ Code navigation and retrieval toolkit for DeepSeek Harness.
 - 最终答案仍由 Agent 读取和判断源码。
 
 抽象依赖为 DeepSeek Harness 的 `tools`、`fs` 服务，以及可选的 `lsp`、`systemPrompt` 服务。依赖版本由 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml) 固定。
-
-### Rename and migration
-
-本次命名统一是**破坏性变更**：
-
-- 包名：`dsh-code-intelligence` → `dsh-code-navigation`
-- 插件 `name`：`code-intelligence` → `code-navigation`
-- 工具前缀：`ci_*` → `nav_*`
-- 索引目录：`.code-intelligence/` → `.code-navigation/`
-
-旧工具名不会同时注册；旧 `.code-intelligence/` 索引不会被新版本读取。升级后需要重新准备语义索引、关系或概览，不能直接复用旧目录。
 
 ## Install
 
@@ -115,7 +102,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider；缺少服
 
 ## Language Scope
 
-当前只对 **TypeScript（`.ts`）** 做过实际验证。实现包含 `.tsx`、`.js`、`.jsx` 的语法路径和配置校验，但这些语言/扩展尚未独立测试；不要把 TypeScript 的结果外推到 JavaScript、JSX、TSX 或其他语言。批量 LSP 工具目前也只接受 `.ts` 使用点。
+解析与检索路径覆盖 `.ts`、`.tsx`、`.js`、`.jsx`；批量 LSP 和引用查询只接受 `.ts` 使用点。其他语言不在当前范围内，不要把 TypeScript/JavaScript 的结果外推为其他语言支持。
 
 ## Tools
 
