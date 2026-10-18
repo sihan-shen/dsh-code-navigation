@@ -1,4 +1,6 @@
 import { contextDeclarations } from '../ast/typescript-context-ranges.js'
+import { searchSemanticContext } from './semantic-context-search.js'
+import type { SemanticIndexConfig } from '../semantic/types.js'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
@@ -12,7 +14,8 @@ const MAX_TEXT_BYTES = 8192
 const encoder = new TextEncoder()
 const supported = /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i
 
-export interface ContextQuery { terms: string[]; path?: string; limit?: number }
+export type ContextMode = 'auto' | 'lexical' | 'hybrid'
+export interface ContextQuery { terms?: string[]; query?: string; mode?: ContextMode; path?: string; limit?: number }
 export type FragmentSource = 'lexical-window' | 'declaration-context' | 'declaration-partial'
 export interface SourceAnchor {
   kind: 'match' | 'declaration'
@@ -31,6 +34,8 @@ export interface CodeFragment {
   contextStartLine: number
   contextEndLine: number
   anchors: SourceAnchor[]
+  /** Present when this file was also selected by the optional semantic index. */
+  seededByVector?: boolean
 }
 export interface TermCoverage {
   term: string
@@ -48,6 +53,9 @@ export interface ContextResult {
   skipped: { path: string; reason: string }[]
   limits: string[]
   truncated: boolean
+  usedVector: boolean
+  vectorHits: number
+  queryEmbeddings: number
   terms: TermCoverage[]
   fragments: CodeFragment[]
 }
@@ -60,18 +68,26 @@ function workspacePath(path: string): string {
   return path.split('/').filter(part => part && part !== '.').join('/') || '.'
 }
 
-function validateQuery(args: ContextQuery): { terms: string[]; path: string; limit: number } {
-  if (args.terms.length < 1 || args.terms.length > 6) throw new Error('terms must contain 1–6 literal search terms')
-  const terms = [...new Set(args.terms.map(term => term.trim()))]
+function validateQuery(args: ContextQuery): { terms: string[]; query?: string; mode: ContextMode; path: string; limit: number } {
+  const terms = [...new Set((args.terms ?? []).map(term => term.trim()))]
+  const query = args.query?.trim()
+  const mode = args.mode ?? 'auto'
+  if (!['auto', 'lexical', 'hybrid'].includes(mode)) throw new Error('mode must be auto, lexical or hybrid')
+  if (terms.length === 0 && !query) throw new Error('provide 1–6 literal terms or a natural-language query')
+  if (args.terms !== undefined && args.terms.length > 6) throw new Error('terms must contain at most 6 literal search terms')
+  if (args.terms !== undefined && args.terms.length === 0 && !query) throw new Error('terms must contain 1–6 literal search terms')
   if (terms.some(term => term.length < 2 || term.length > 64 || /[\r\n\0]/.test(term)
     || !/[\p{L}\p{N}]/u.test(term))) throw new Error('terms must contain 2–64 characters, including a letter or number')
+  if (query !== undefined && (query.length < 1 || query.length > 1000 || /\0/.test(query))) throw new Error('query must contain 1–1000 characters')
+  if (mode === 'lexical' && terms.length === 0) throw new Error('lexical mode requires at least one literal term')
+  if (mode === 'hybrid' && !query) throw new Error('hybrid mode requires a natural-language query')
   const limit = args.limit ?? 4
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
-  return { terms, path: workspacePath(args.path ?? '.'), limit }
+  return { terms, query, mode, path: workspacePath(args.path ?? '.'), limit }
 }
 
 interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number }
-interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string> }
+interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string>; seeds: Set<number> }
 interface Candidate { file: string; entry: CandidateMatches; target: Awaited<ReturnType<FileSystem['resolve']>> }
 
 function escapeRegExp(value: string): string {
@@ -215,13 +231,16 @@ function sourceUnits(path: string, source: string, hits: { line: number; text: s
 
 export async function searchCodeContext(
   fs: FileSystem, tools: ToolRuntime, args: ContextQuery, exec: ToolExecution,
+  semantic?: SemanticIndexConfig,
 ): Promise<ContextResult> {
   const rawPath = args.path ?? '.'
   // Absolute paths are accepted only after provider containment checks below.
   const absolute = rawPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rawPath)
-  const { terms, path: relativePath, limit } = validateQuery({ ...args, path: absolute ? '.' : rawPath })
+  const { terms, query, mode, path: relativePath, limit } = validateQuery({ ...args, path: absolute ? '.' : rawPath })
   const cwd = exec.agent?.session.header.cwd
   if (!cwd) throw new Error('A Harness Session workspace is required')
+  if (mode === 'hybrid' && !semantic) throw new Error('hybrid mode requires a configured semanticIndex')
+  if (terms.length === 0 && !semantic) throw new Error('a natural-language query requires a configured semanticIndex; provide literal terms')
   exec.signal.throwIfAborted()
   const root = await fs.resolve('.', { cwd, signal: exec.signal })
   // Host grep runs a process in Session cwd; remote FS worlds must not be mixed with it.
@@ -230,37 +249,43 @@ export async function searchCodeContext(
   if (!fs.contains(root, scope)) throw new Error('search path is outside the Session workspace')
   const scopePath = fs.processPath(scope), rootPath = fs.processPath(root).replace(/[\\/]+$/, '')
   const path = workspacePath(scopePath === rootPath ? '.' : scopePath.slice(rootPath.length + 1).replace(/\\/g, '/'))
-  if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable')
-  const pattern = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
-  const outcome = await tools.execute({ name: 'grep', arguments: {
-    pattern, path, include: '*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}' },
-  callId: `${exec.callId}:grep` as typeof exec.callId, rootCallId: exec.rootCallId,
-  parent: exec.token, agent: exec.agent, signal: exec.signal })
-  exec.signal.throwIfAborted()
-  if (outcome.isError) throw new Error(`host grep failed: ${outcome.error.message}`)
-  const value: unknown = outcome.value
-  if (typeof value !== 'object' || value === null || !('matches' in value) || !Array.isArray(value.matches)) {
-    throw new Error('host grep returned no structured matches')
-  }
-  const rawMatches = value.matches
-  const matchLimitHit = rawMatches.length > MAX_MATCHES
-  const matches = matchLimitHit ? rawMatches.slice(0, MAX_MATCHES) : rawMatches
   const files = new Map<string, CandidateMatches>()
-  for (const match of matches) {
+  let rawMatches: unknown[] = []
+  let matchLimitHit = false
+  if (terms.length) {
+    if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable')
+    const pattern = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+    const outcome = await tools.execute({ name: 'grep', arguments: {
+      pattern, path, include: '*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}' },
+    callId: `${exec.callId}:grep` as typeof exec.callId, rootCallId: exec.rootCallId,
+    parent: exec.token, agent: exec.agent, signal: exec.signal })
     exec.signal.throwIfAborted()
-    if (typeof match !== 'object' || match === null || typeof match.path !== 'string'
-      || !Number.isSafeInteger(match.lineNumber) || match.lineNumber < 1 || typeof match.line !== 'string') {
-      throw new Error('host grep returned an invalid match')
+    if (outcome.isError) throw new Error(`host grep failed: ${outcome.error.message}`)
+    const value: unknown = outcome.value
+    if (typeof value !== 'object' || value === null || !('matches' in value) || !Array.isArray(value.matches)) {
+      throw new Error('host grep returned no structured matches')
     }
-    const file = workspacePath(match.path)
-    if (!supported.test(file)) throw new Error('host grep returned an unsupported file')
-    let entry = files.get(file)
-    if (!entry) { entry = { hits: [], terms: new Set() }; files.set(file, entry) }
-    entry.hits.push({ line: match.lineNumber, text: match.line })
-    for (const term of terms) if (match.line.includes(term)) entry.terms.add(term)
+    rawMatches = value.matches
+    matchLimitHit = rawMatches.length > MAX_MATCHES
+    for (const match of (matchLimitHit ? rawMatches.slice(0, MAX_MATCHES) : rawMatches) as unknown[]) {
+      exec.signal.throwIfAborted()
+      if (typeof match !== 'object' || match === null || typeof (match as { path?: unknown }).path !== 'string'
+        || !Number.isSafeInteger((match as { lineNumber?: unknown }).lineNumber)
+        || (match as { lineNumber: number }).lineNumber < 1 || typeof (match as { line?: unknown }).line !== 'string') {
+        throw new Error('host grep returned an invalid match')
+      }
+      const parsed = match as { path: string; lineNumber: number; line: string }
+      const file = workspacePath(parsed.path)
+      if (!supported.test(file)) throw new Error('host grep returned an unsupported file')
+      let entry = files.get(file)
+      if (!entry) { entry = { hits: [], terms: new Set(), seeds: new Set() }; files.set(file, entry) }
+      entry.hits.push({ line: parsed.lineNumber, text: parsed.line })
+      for (const term of terms) if (parsed.line.includes(term)) entry.terms.add(term)
+    }
   }
   const result: ContextResult = { matchesFound: rawMatches.length, candidateFiles: files.size,
-    filesRead: 0, bytesRead: 0, skipped: [], limits: [], truncated: false, terms: [], fragments: [] }
+    filesRead: 0, bytesRead: 0, skipped: [], limits: [], truncated: false,
+    usedVector: false, vectorHits: 0, queryEmbeddings: 0, terms: [], fragments: [] }
   const mark = (reason: string) => { result.truncated = true; if (!result.limits.includes(reason)) result.limits.push(reason) }
   if (matchLimitHit) mark(`match limit (${MAX_MATCHES}); first ${MAX_MATCHES} of ${rawMatches.length} matches processed`)
   const termStats = new Map(terms.map(term => [term, { matchedFiles: 0, matchedLines: 0 }]))
@@ -269,6 +294,30 @@ export async function searchCodeContext(
       const stat = termStats.get(term)!
       stat.matchedFiles++
       stat.matchedLines += entry.hits.reduce((n, hit) => n + (hit.text.includes(term) ? 1 : 0), 0)
+    }
+  }
+  const useVector = semantic !== undefined && query !== undefined
+    && (mode === 'hybrid' || terms.length === 0 || (mode === 'auto' && files.size === 0))
+  if (useVector) {
+    try {
+      const vector = await searchSemanticContext(fs, semantic!, { query: query!, path, limit: 4, expand_relations: false },
+        { cwd, signal: exec.signal })
+      result.usedVector = true
+      result.queryEmbeddings = vector.queryEmbeddings
+      result.vectorHits = vector.hits.length
+      for (const hit of vector.hits) {
+        const file = workspacePath(hit.path)
+        if (!supported.test(file)) continue
+        let entry = files.get(file)
+        if (!entry) { entry = { hits: [], terms: new Set(), seeds: new Set() }; files.set(file, entry) }
+        if (Number.isSafeInteger(hit.startLine) && hit.startLine >= 1) entry.seeds.add(hit.startLine)
+      }
+      if (vector.truncated) mark(`vector candidates partial: ${vector.limits.join('; ')}`)
+      result.candidateFiles = files.size
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      if (mode === 'hybrid' || terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
+      mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
     }
   }
   // Validate every candidate before dropping any due to a resource budget.
@@ -308,7 +357,14 @@ export async function searchCodeContext(
     const candidate = declarationHit ?? withTerm[0]
     if (candidate) selected.add(candidate)
   }
+  const vectorCandidates = candidates.filter(candidate => candidate.entry.seeds.size > 0)
+  // Keep at most two slots for vector seeds when both backends are active.
+  const lexicalCap = terms.length && useVector ? Math.max(0, MAX_FILES - Math.min(2, vectorCandidates.length)) : MAX_FILES
   for (const candidate of candidates) {
+    if (selected.size >= lexicalCap) break
+    selected.add(candidate)
+  }
+  for (const candidate of vectorCandidates) {
     if (selected.size >= MAX_FILES) break
     selected.add(candidate)
   }
@@ -336,19 +392,27 @@ export async function searchCodeContext(
     // grep uses LF records, while TypeScript also treats these as line breaks.
     if (/\r(?!\n)|[\u2028\u2029]/.test(source)) { skip('unsupported line separators; use explicit file reading'); continue }
     const lines = source.split('\n')
-    const hits = entry.hits.filter(hit => {
-      let current = lines[hit.line - 1]
-      // rg strips CR only when it belongs to a CRLF terminator, not at EOF.
-      if (hit.line < lines.length) current = current?.replace(/\r$/, '')
-      let searched = hit.text
-      if (hit.line === 1) {
-        current = current?.replace(/^\uFEFF/, '')
-        searched = searched.replace(/^\uFEFF/, '')
-      }
-      return current === searched && terms.some(term => hit.text.includes(term))
-    })
-    if (hits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
-    units.push(...sourceUnits(file, source, hits, terms, limit, exec.signal, mark))
+    const hits = entry.hits.length
+      ? entry.hits.filter(hit => {
+        let current = lines[hit.line - 1]
+        // rg strips CR only when it belongs to a CRLF terminator, not at EOF.
+        if (hit.line < lines.length) current = current?.replace(/\r$/, '')
+        let searched = hit.text
+        if (hit.line === 1) {
+          current = current?.replace(/^\uFEFF/, '')
+          searched = searched.replace(/^\uFEFF/, '')
+        }
+        return current === searched && terms.some(term => hit.text.includes(term))
+      })
+      : [...entry.seeds].sort((a, b) => a - b).filter(line => line <= lines.length)
+        .map(line => ({ line, text: lines[line - 1] }))
+    if (entry.hits.length && hits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
+    if (!hits.length) { skip('no verified or seeded source line'); continue }
+    const nextUnits = sourceUnits(file, source, hits, terms, limit, exec.signal, mark)
+    if (entry.seeds.size) {
+      for (const unit of nextUnits) for (const fragment of unit.fragments) fragment.seededByVector = true
+    }
+    units.push(...nextUnits)
   }
   const score = (unit: ContextUnit) => (terms.includes(unit.name) ? 1000 : 0)
     + unit.terms.reduce((n, term) => n + termWeight(term), 0)

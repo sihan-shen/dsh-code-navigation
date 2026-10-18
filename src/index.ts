@@ -24,7 +24,7 @@ export function apply(ctx: Context, config: {
 } = {}): void {
   if (config.enableFindDeclarations !== false) registerFindDeclarationsTool(ctx)
   if (config.enableToolCooperationPrompt === true) registerToolCooperationPrompt(ctx)
-  if (config.enableCodeContext === true) registerSearchContextTool(ctx)
+  if (config.enableCodeContext === true) registerSearchContextTool(ctx, config.semanticIndex)
   if (config.semanticIndex) registerSemanticContextTool(ctx, config.semanticIndex)
   if (config.semanticIndex?.overviews) registerCodeOverviewTool(ctx, config.semanticIndex)
   if (config.enablePrecedingLsp === true) {
