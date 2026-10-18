@@ -1,5 +1,5 @@
 import { contextDeclarations } from '../ast/typescript-context-ranges.js'
-import { searchSemanticSeeds } from './semantic-context-search.js'
+import { searchSemanticSeeds, type SemanticSeed } from './semantic-context-search.js'
 import type { SemanticIndexConfig } from '../semantic/types.js'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
@@ -38,6 +38,8 @@ export interface CodeFragment {
   seededByVector?: boolean
   seedStartLine?: number
   seedEndLine?: number
+  /** How much of this fragment's seed range the fragment covers. */
+  seedCoverage?: 'full' | 'partial'
 }
 export interface TermCoverage {
   term: string
@@ -60,7 +62,8 @@ export interface ContextResult {
   queryEmbeddings: number
   vectorOnlyFiles: number
   vectorSeededFragments: number
-  vectorStatus: 'off' | 'ok' | 'empty' | 'unavailable' | 'stale' | 'invalid' | 'error'
+  seedCoveredFragments: number
+  vectorStatus: 'off' | 'ok' | 'empty' | 'reused' | 'unavailable' | 'stale' | 'invalid' | 'error'
   vectorTrigger: 'none' | 'hybrid' | 'query-only' | 'lexical-empty' | 'lexical-weak'
   terms: TermCoverage[]
   fragments: CodeFragment[]
@@ -93,6 +96,8 @@ function validateQuery(args: ContextQuery): { terms: string[]; query?: string; m
 }
 
 interface VectorSeed { startLine: number; endLine: number; rank: number; score: number }
+interface SemanticQueryCacheEntry { seeds: SemanticSeed[]; queryEmbeddings: number; truncated: boolean; limits: string[] }
+export interface SemanticQueryCache { entries: Map<string, SemanticQueryCacheEntry> }
 interface SourceHit { line: number; text: string; seed?: VectorSeed }
 interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number; origin: 'lexical' | 'vector' | 'both'; seedRank?: number }
 interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string>; seeds: VectorSeed[] }
@@ -212,6 +217,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
         fragment.seededByVector = true
         fragment.seedStartLine = seed.startLine
         fragment.seedEndLine = seed.endLine
+        fragment.seedCoverage = fragment.startLine <= seed.startLine && fragment.endLine >= seed.endLine ? 'full' : 'partial'
       }
       return pieces
     }
@@ -280,6 +286,8 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       previous.seededByVector = Boolean(previous.seededByVector || fragment.seededByVector)
       if (fragment.seedStartLine !== undefined) previous.seedStartLine = previous.seedStartLine ?? fragment.seedStartLine
       if (fragment.seedEndLine !== undefined) previous.seedEndLine = previous.seedEndLine ?? fragment.seedEndLine
+      if (fragment.seedCoverage === 'full' || previous.seedCoverage === 'full') previous.seedCoverage = 'full'
+      else if (fragment.seedCoverage === 'partial' || previous.seedCoverage === 'partial') previous.seedCoverage = 'partial'
       previous.anchors = [...new Map([...previous.anchors, ...fragment.anchors]
         .map(anchor => [`${anchor.kind}:${anchor.name}:${anchor.line}:${anchor.character}`, anchor])).values()].slice(0, 3)
     }
@@ -292,7 +300,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
 
 export async function searchCodeContext(
   fs: FileSystem, tools: ToolRuntime, args: ContextQuery, exec: ToolExecution,
-  semantic?: SemanticIndexConfig,
+  semantic?: SemanticIndexConfig, semanticCache?: SemanticQueryCache,
 ): Promise<ContextResult> {
   const rawPath = args.path ?? '.'
   // Absolute paths are accepted only after provider containment checks below.
@@ -347,7 +355,7 @@ export async function searchCodeContext(
   const result: ContextResult = { matchesFound: rawMatches.length, candidateFiles: files.size,
     filesRead: 0, bytesRead: 0, skipped: [], limits: [], truncated: false,
     usedVector: false, vectorHits: 0, queryEmbeddings: 0, vectorOnlyFiles: 0,
-    vectorSeededFragments: 0, vectorStatus: 'off', vectorTrigger: 'none', terms: [], fragments: [] }
+    vectorSeededFragments: 0, seedCoveredFragments: 0, vectorStatus: 'off', vectorTrigger: 'none', terms: [], fragments: [] }
   const mark = (reason: string) => {
     result.truncated = true
     const text = reason.length > 512 ? `${reason.slice(0, 512)}…` : reason
@@ -368,22 +376,31 @@ export async function searchCodeContext(
   result.vectorTrigger = !useVector ? 'none' : terms.length === 0 ? 'query-only' : mode === 'hybrid' ? 'hybrid'
     : files.size === 0 ? 'lexical-empty' : 'lexical-weak'
   if (useVector) {
-    let vector: Awaited<ReturnType<typeof searchSemanticSeeds>> | undefined
-    try {
-      vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 4 },
-        { cwd, signal: exec.signal })
-    } catch (error) {
-      exec.signal.throwIfAborted()
-      const reason = error instanceof Error ? error.message : String(error)
-      result.vectorStatus = /stale/.test(reason) ? 'stale' : /invalid or incompatible/.test(reason) ? 'invalid' : 'unavailable'
-      if (terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
-      mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
+    const cacheKey = `${semantic!.embedding.id}\0${semantic!.files.join('|')}\0${query!}\0${path}\0${limit}`
+    let vector: { seeds: SemanticSeed[]; queryEmbeddings: number; truncated: boolean; limits: string[] } | undefined
+    let reused = false
+    const cached = semanticCache?.entries.get(cacheKey)
+    if (cached) {
+      vector = cached
+      reused = true
+      result.vectorStatus = 'reused'
+    } else {
+      try {
+        vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 4 },
+          { cwd, signal: exec.signal })
+      } catch (error) {
+        exec.signal.throwIfAborted()
+        const reason = error instanceof Error ? error.message : String(error)
+        result.vectorStatus = /stale/.test(reason) ? 'stale' : /invalid or incompatible/.test(reason) ? 'invalid' : 'unavailable'
+        if (terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
+        mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
+      }
     }
     if (vector) {
       result.usedVector = true
-      result.queryEmbeddings = vector.queryEmbeddings
+      result.queryEmbeddings = reused ? 0 : vector.queryEmbeddings
       result.vectorHits = vector.seeds.length
-      result.vectorStatus = vector.seeds.length ? 'ok' : 'empty'
+      if (!reused) result.vectorStatus = vector.seeds.length ? 'ok' : 'empty'
       for (const seed of vector.seeds) {
         const file = workspacePath(seed.path)
         if (!supported.test(file)) continue
@@ -391,9 +408,13 @@ export async function searchCodeContext(
         if (!entry) { entry = { hits: [], terms: new Set(), seeds: [] }; files.set(file, entry) }
         entry.seeds.push({ startLine: seed.startLine, endLine: seed.endLine, rank: seed.rank, score: seed.score })
       }
-      if (vector.truncated) {
+      if (vector.truncated && !reused) {
         const shown = vector.limits.slice(0, 8)
         mark(`vector candidate limits: ${shown.join('; ')}${vector.limits.length > shown.length ? `; +${vector.limits.length - shown.length} more` : ''}`)
+      }
+      if (semanticCache && !reused) {
+        semanticCache.entries.set(cacheKey, vector)
+        while (semanticCache.entries.size > 8) semanticCache.entries.delete(semanticCache.entries.keys().next().value!)
       }
       result.candidateFiles = files.size
     }
@@ -543,6 +564,7 @@ export async function searchCodeContext(
     textBytes += size; result.fragments.push(...additions); represented.add(unit.path)
     if (unit.origin === 'vector') vectorShown.add(unit.path)
     result.vectorSeededFragments += additions.filter(fragment => fragment.seededByVector).length
+    result.seedCoveredFragments += additions.filter(fragment => fragment.seedCoverage === 'full').length
   }
   const selectedFiles = new Set([...selected].map(candidate => candidate.file))
   result.terms = terms.map(term => {
