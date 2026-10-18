@@ -28,6 +28,39 @@ export interface SemanticContextResult {
   fragments: (SourceChunk & { text: string })[]
 }
 
+export interface SemanticSeed { path: string; startLine: number; endLine: number; score: number; rank: number }
+export interface SemanticSeedResult {
+  seeds: SemanticSeed[]
+  queryEmbeddings: number
+  truncated: boolean
+  limits: string[]
+}
+
+/** Candidate-only semantic lookup: no source fragments, relations or AST presentation. */
+export async function searchSemanticSeeds(fs: FileSystem, input: SemanticIndexConfig,
+  args: { query: string; path?: string; limit?: number }, exec: IndexExecution): Promise<SemanticSeedResult> {
+  const config = resolveConfig(input)
+  const query = args.query?.trim(), path = relativePath(args.path ?? '.'), limit = args.limit ?? 4
+  if (!query || query.length > 1000 || /\0/.test(query)) throw new Error('query must contain 1–1000 characters')
+  if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
+  const location = await snapshotLocation(fs, exec), { snapshot, bytes } = await loadSnapshot(fs, config, location)
+  const candidates = snapshot.chunks.filter(chunk => path === '.' || chunk.path === path || chunk.path.startsWith(path + '/'))
+  if (!candidates.length) {
+    await verifySnapshot(fs, location, snapshot)
+    return { seeds: [], queryEmbeddings: 0, truncated: snapshot.omissions.length > 0, limits: [...snapshot.omissions] }
+  }
+  const [vector] = normalizeVectors(await config.embedding.embed([query], 'query', location.signal), 1, config.embedding.dimensions)
+  const scored = candidates.map(chunk => ({ chunk, score: chunk.vector.reduce((sum, n, i) => sum + n * vector[i], 0) }))
+    .sort((a, b) => b.score - a.score || (a.chunk.path < b.chunk.path ? -1 : a.chunk.path > b.chunk.path ? 1 : 0)
+      || a.chunk.startLine - b.chunk.startLine)
+  const selected = scored.slice(0, limit)
+  await verifySnapshot(fs, location, snapshot)
+  const limits = [...snapshot.omissions]
+  if (scored.length > limit) limits.push(`top-${limit} candidates only; ${scored.length - limit} lower-ranked chunks not returned`)
+  return { seeds: selected.map(({ chunk, score }, rank) => ({ path: chunk.path, startLine: chunk.startLine, endLine: chunk.endLine, score, rank })),
+    queryEmbeddings: 1, truncated: limits.length > 0, limits }
+}
+
 export async function searchSemanticContext(fs: FileSystem, input: SemanticIndexConfig,
   args: SemanticQuery, exec: IndexExecution): Promise<SemanticContextResult> {
   const started = performance.now(), config = resolveConfig(input)

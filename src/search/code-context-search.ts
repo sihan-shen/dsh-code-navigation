@@ -1,5 +1,5 @@
 import { contextDeclarations } from '../ast/typescript-context-ranges.js'
-import { searchSemanticContext } from './semantic-context-search.js'
+import { searchSemanticSeeds } from './semantic-context-search.js'
 import type { SemanticIndexConfig } from '../semantic/types.js'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
@@ -34,8 +34,10 @@ export interface CodeFragment {
   contextStartLine: number
   contextEndLine: number
   anchors: SourceAnchor[]
-  /** Present when this file was also selected by the optional semantic index. */
+  /** True only when this fragment's range came from a vector seed. */
   seededByVector?: boolean
+  seedStartLine?: number
+  seedEndLine?: number
 }
 export interface TermCoverage {
   term: string
@@ -56,6 +58,10 @@ export interface ContextResult {
   usedVector: boolean
   vectorHits: number
   queryEmbeddings: number
+  vectorOnlyFiles: number
+  vectorSeededFragments: number
+  vectorStatus: 'off' | 'ok' | 'empty' | 'unavailable' | 'stale' | 'invalid' | 'error'
+  vectorTrigger: 'none' | 'hybrid' | 'query-only' | 'lexical-empty' | 'lexical-weak'
   terms: TermCoverage[]
   fragments: CodeFragment[]
 }
@@ -86,8 +92,10 @@ function validateQuery(args: ContextQuery): { terms: string[]; query?: string; m
   return { terms, query, mode, path: workspacePath(args.path ?? '.'), limit }
 }
 
-interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number }
-interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string>; seeds: Set<number> }
+interface VectorSeed { startLine: number; endLine: number; rank: number; score: number }
+interface SourceHit { line: number; text: string; seed?: VectorSeed }
+interface ContextUnit { fragments: CodeFragment[]; terms: string[]; name: string; path: string; start: number; origin: 'lexical' | 'vector' | 'both'; seedRank?: number }
+interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<string>; seeds: VectorSeed[] }
 interface Candidate { file: string; entry: CandidateMatches; target: Awaited<ReturnType<FileSystem['resolve']>> }
 
 function escapeRegExp(value: string): string {
@@ -105,47 +113,80 @@ function declarationLike(line: string, term: string): boolean {
   ].some(pattern => pattern.test(line))
 }
 
-function sourceUnits(path: string, source: string, hits: { line: number; text: string }[], terms: string[],
+function sourceUnits(path: string, source: string, hits: SourceHit[], terms: string[],
   limit: number, signal: AbortSignal, mark: (reason: string) => void): ContextUnit[] {
   const lines = source.split('\n'), declarations = contextDeclarations(path, source,
     reason => mark(`${path}: ${reason}`))
   const units = new Map<string, ContextUnit>()
-  const uniqueHits = [...new Map(hits.map(hit => [hit.line, hit])).values()].sort((a, b) => a.line - b.line)
+  const uniqueHits = [...new Map(hits.map(hit => [`${hit.line}:${hit.seed?.startLine ?? ''}:${hit.seed?.endLine ?? ''}`, hit])).values()]
+    .sort((a, b) => a.line - b.line || (a.seed?.startLine ?? 0) - (b.seed?.startLine ?? 0))
   for (const hit of uniqueHits) {
     signal.throwIfAborted()
-    const hitIndex = hit.line - 1
-    const enclosing = declarations.filter(r => r.matchStart <= hitIndex && r.end >= hitIndex)
-      .sort((a, b) => (a.end - a.matchStart) - (b.end - b.matchStart))
-    const named = enclosing.filter(r => r.matchStart === hitIndex && terms.includes(r.name)
-      && lines[hitIndex].includes(r.name))
+    const seed = hit.seed, hitIndex = hit.line - 1
+    const seedFirst = seed ? Math.max(0, seed.startLine - 1) : hitIndex
+    const seedLast = seed ? Math.min(lines.length - 1, seed.endLine - 1) : hitIndex
+    const focusFirst = seed ? seedFirst : Math.max(0, hitIndex - 4)
+    const focusLast = seed ? seedLast : Math.min(lines.length - 1, hitIndex + 8)
+    const overlap = (range: { start: number; end: number }) => Math.max(0,
+      Math.min(range.end, seedLast) - Math.max(range.start, seedFirst) + 1)
+    const enclosing = seed
+      ? declarations.filter(range => range.end >= seedFirst && range.matchStart <= seedLast)
+        .sort((a, b) => overlap(b) - overlap(a) || (a.end - a.start) - (b.end - b.start))
+      : declarations.filter(range => range.matchStart <= hitIndex && range.end >= hitIndex)
+        .sort((a, b) => (a.end - a.matchStart) - (b.end - b.matchStart))
+    const named = seed ? [] : enclosing.filter(range => range.matchStart === hitIndex && terms.includes(range.name)
+      && lines[hitIndex].includes(range.name))
     // Line-only grep cannot disambiguate multiple declarations beginning on one line.
-    const sameLine = enclosing.filter(r => r.matchStart === hitIndex)
-    const declaration = named.length === 1 ? named[0]
-      : sameLine.length > 1 ? undefined : enclosing[0]
+    const sameLine = seed ? [] : enclosing.filter(range => range.matchStart === hitIndex)
+    // Prefer a declaration containing the whole seed; a tail-only overlap is not evidence.
+    const containingAll = seed ? declarations.filter(range => range.matchStart <= seedFirst && range.end >= seedLast)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
+    const containingStart = seed ? declarations.filter(range => range.matchStart <= seedFirst && range.end >= seedFirst)
+      .sort((a, b) => (a.end - a.start) - (b.end - b.start)) : []
+    const declaration = seed
+      ? containingAll[0] ?? containingStart[0]
+        ?? (enclosing[0] && overlap(enclosing[0]) * 2 >= seedLast - seedFirst + 1 ? enclosing[0] : undefined)
+      : named.length === 1 ? named[0]
+        : sameLine.length > 1 ? undefined : enclosing[0]
     const hitAnchors: SourceAnchor[] = []
-    for (const term of terms) {
-      if (!hit.text.includes(term)) continue
-      const at = hit.text.indexOf(term)
-      if (at < 0) continue
-      const bom = hit.line === 1 && lines[0].startsWith('\uFEFF') && !hit.text.startsWith('\uFEFF') ? 1 : 0
-      hitAnchors.push({ kind: 'match', name: term, line: hit.line, character: at + 1 + bom })
+    const anchorLines = seed
+      ? Array.from({ length: seedLast - seedFirst + 1 }, (_, index) => ({ line: seedFirst + index + 1, text: lines[seedFirst + index] ?? '' }))
+      : [{ line: hit.line, text: hit.text }]
+    for (const item of anchorLines) {
+      for (const term of terms) {
+        if (!item.text.includes(term)) continue
+        const at = item.text.indexOf(term)
+        if (at < 0) continue
+        const bom = item.line === 1 && lines[0].startsWith('\uFEFF') && !item.text.startsWith('\uFEFF') ? 1 : 0
+        hitAnchors.push({ kind: 'match', name: term, line: item.line, character: at + 1 + bom })
+      }
     }
     const declarationAnchor: SourceAnchor | undefined = declaration?.name
       ? { kind: 'declaration', name: declaration.name, line: declaration.nameLine + 1, character: declaration.nameCharacter }
       : undefined
     const allAnchors = declarationAnchor ? [declarationAnchor, ...hitAnchors] : hitAnchors
+    let splitSkipped = false
     function split(first: number, last: number, sourceKind: FragmentSource,
       contextFirst: number, contextLast: number): CodeFragment[] | undefined {
       const pieces: CodeFragment[] = []
       for (let cursor = first; cursor <= last;) {
         signal.throwIfAborted()
+        if (cursor < 0 || cursor >= lines.length) return pieces.length ? pieces : undefined
         const text: string[] = []; let bytes = 0, next = cursor
-        while (next <= last && text.length < 40) {
+        while (next <= last && next < lines.length && text.length < 40) {
           const size = encoder.encode(lines[next]).byteLength + (text.length ? 1 : 0)
           if (bytes + size > MAX_BLOCK_BYTES) break
           bytes += size; text.push(lines[next++])
         }
-        if (!text.length) return undefined
+        if (!text.length) {
+          if (encoder.encode(lines[cursor] ?? '').byteLength > MAX_BLOCK_BYTES) {
+            splitSkipped = true
+            mark(`${path}: source line ${cursor + 1} exceeds 2 KiB`)
+            cursor++
+            continue
+          }
+          return pieces.length ? pieces : undefined
+        }
         const content = text.join('\n'), startLine = cursor + 1, endLine = next
         const anchors = [...new Map(allAnchors.filter(anchor => anchor.line >= startLine && anchor.line <= endLine)
           .map(anchor => [`${anchor.kind}:${anchor.name}:${anchor.line}:${anchor.character}`, anchor])).values()]
@@ -163,21 +204,33 @@ function sourceUnits(path: string, source: string, hits: { line: number; text: s
       const [first, ...rest] = pieces
       return [{ ...first, anchors: [declarationAnchor, ...first.anchors].slice(0, 3) }, ...rest]
     }
+    function markSeed(pieces: CodeFragment[] | undefined): CodeFragment[] | undefined {
+      if (!seed || !pieces) return pieces
+      for (const fragment of pieces) {
+        if (fragment.endLine < seed.startLine || fragment.startLine > seed.endLine) continue
+        fragment.seededByVector = true
+        fragment.seedStartLine = seed.startLine
+        fragment.seedEndLine = seed.endLine
+      }
+      return pieces
+    }
+    splitSkipped = false
     const full = withDeclarationAnchor(declaration
       ? split(declaration.start, declaration.end, 'declaration-context', declaration.start, declaration.end) : undefined)
+    const fullComplete = !splitSkipped
     const fullBytes = full?.reduce((n, fragment) => n + encoder.encode(fragment.text).byteLength, 0) ?? 0
     let fragments: CodeFragment[] | undefined
     let key: string
-    if (declaration && full && full.length <= limit && fullBytes <= MAX_TEXT_BYTES) {
-      fragments = full
+    if (declaration && full && fullComplete && full.length <= limit && fullBytes <= MAX_TEXT_BYTES) {
+      fragments = markSeed(full)
       key = `${declaration.start}:${declaration.end}:declaration-context`
     } else if (declaration) {
       mark('declaration context reduced to a bounded partial range')
       const ranges = [
-        { first: Math.max(declaration.start, hitIndex - 4), last: Math.min(declaration.end, hitIndex + 8), priority: 0 },
+        { first: Math.max(declaration.start, focusFirst), last: Math.min(declaration.end, focusLast), priority: 0 },
         { first: declaration.start, last: Math.min(declaration.end, declaration.matchStart + 2), priority: 1 },
       ]
-      if (declaration.end - 2 > hitIndex + 2) {
+      if (declaration.end - 2 > focusLast + 2) {
         ranges.push({ first: Math.max(declaration.start, declaration.end - 1), last: declaration.end, priority: 2 })
       }
       const merged: typeof ranges = []
@@ -199,26 +252,33 @@ function sourceUnits(path: string, source: string, hits: { line: number; text: s
         if (pieces.length >= limit) break
       }
       pieces.sort((a, b) => a.startLine - b.startLine)
-      fragments = withDeclarationAnchor(pieces)
+      fragments = markSeed(withDeclarationAnchor(pieces))
       key = `${declaration.start}:${declaration.end}:declaration-partial:${hit.line}`
     } else {
-      const first = Math.max(0, hitIndex - 8), last = Math.min(lines.length - 1, hitIndex + 8)
-      fragments = split(first, last, 'lexical-window', first, last)
+      const first = seed ? seedFirst : Math.max(0, hitIndex - 8)
+      const last = seed ? seedLast : Math.min(lines.length - 1, hitIndex + 8)
+      fragments = markSeed(split(first, last, 'lexical-window', first, last))
       key = `${first}:${last}:lexical-window`
     }
-    if (!fragments?.length) { mark('source line exceeds 2 KiB'); continue }
+    if (seed) key += `:seed:${seed.startLine}-${seed.endLine}:${seed.rank}`
+    if (!fragments?.length) { mark('no usable source lines'); continue }
+    const unit: ContextUnit = { fragments,
+      terms: terms.filter(term => fragments!.some(fragment => fragment.text.includes(term))),
+      name: declaration?.name ?? '', path, start: fragments[0].startLine - 1,
+      origin: seed ? 'vector' : 'lexical', seedRank: seed?.rank }
     const existing = units.get(key)
-    if (!existing) {
-      units.set(key, { fragments, terms: terms.filter(term => fragments!.some(fragment => fragment.text.includes(term))),
-        name: declaration?.name ?? '', path, start: fragments[0].startLine - 1 })
-      continue
-    }
+    if (!existing) { units.set(key, unit); continue }
     // Several hits may share one declaration or lexical window; keep every term anchor.
+    existing.origin = existing.origin === unit.origin ? unit.origin : 'both'
+    existing.seedRank = existing.seedRank === undefined ? unit.seedRank : unit.seedRank === undefined ? existing.seedRank : Math.min(existing.seedRank, unit.seedRank)
     const byRange = new Map(existing.fragments.map(fragment => [`${fragment.startLine}:${fragment.endLine}`, fragment]))
     for (const fragment of fragments) {
       const previous = byRange.get(`${fragment.startLine}:${fragment.endLine}`)
       if (!previous) { byRange.set(`${fragment.startLine}:${fragment.endLine}`, fragment); continue }
       previous.matchedTerms = [...new Set([...previous.matchedTerms, ...fragment.matchedTerms])]
+      previous.seededByVector = Boolean(previous.seededByVector || fragment.seededByVector)
+      previous.seedStartLine = previous.seedStartLine ?? fragment.seedStartLine
+      previous.seedEndLine = previous.seedEndLine ?? fragment.seedEndLine
       previous.anchors = [...new Map([...previous.anchors, ...fragment.anchors]
         .map(anchor => [`${anchor.kind}:${anchor.name}:${anchor.line}:${anchor.character}`, anchor])).values()].slice(0, 3)
     }
@@ -278,15 +338,20 @@ export async function searchCodeContext(
       const file = workspacePath(parsed.path)
       if (!supported.test(file)) throw new Error('host grep returned an unsupported file')
       let entry = files.get(file)
-      if (!entry) { entry = { hits: [], terms: new Set(), seeds: new Set() }; files.set(file, entry) }
+      if (!entry) { entry = { hits: [], terms: new Set(), seeds: [] }; files.set(file, entry) }
       entry.hits.push({ line: parsed.lineNumber, text: parsed.line })
       for (const term of terms) if (parsed.line.includes(term)) entry.terms.add(term)
     }
   }
   const result: ContextResult = { matchesFound: rawMatches.length, candidateFiles: files.size,
     filesRead: 0, bytesRead: 0, skipped: [], limits: [], truncated: false,
-    usedVector: false, vectorHits: 0, queryEmbeddings: 0, terms: [], fragments: [] }
-  const mark = (reason: string) => { result.truncated = true; if (!result.limits.includes(reason)) result.limits.push(reason) }
+    usedVector: false, vectorHits: 0, queryEmbeddings: 0, vectorOnlyFiles: 0,
+    vectorSeededFragments: 0, vectorStatus: 'off', vectorTrigger: 'none', terms: [], fragments: [] }
+  const mark = (reason: string) => {
+    result.truncated = true
+    const text = reason.length > 512 ? `${reason.slice(0, 512)}…` : reason
+    if (result.limits.length < 64 && !result.limits.includes(text)) result.limits.push(text)
+  }
   if (matchLimitHit) mark(`match limit (${MAX_MATCHES}); first ${MAX_MATCHES} of ${rawMatches.length} matches processed`)
   const termStats = new Map(terms.map(term => [term, { matchedFiles: 0, matchedLines: 0 }]))
   for (const entry of files.values()) {
@@ -296,28 +361,40 @@ export async function searchCodeContext(
       stat.matchedLines += entry.hits.reduce((n, hit) => n + (hit.text.includes(term) ? 1 : 0), 0)
     }
   }
+  const weakLexical = files.size === 0 || terms.some(term => (termStats.get(term)?.matchedFiles ?? 0) === 0)
   const useVector = semantic !== undefined && query !== undefined
-    && (mode === 'hybrid' || terms.length === 0 || (mode === 'auto' && files.size === 0))
+    && (mode === 'hybrid' || terms.length === 0 || (mode === 'auto' && weakLexical))
+  result.vectorTrigger = !useVector ? 'none' : terms.length === 0 ? 'query-only' : mode === 'hybrid' ? 'hybrid'
+    : files.size === 0 ? 'lexical-empty' : 'lexical-weak'
   if (useVector) {
+    let vector: Awaited<ReturnType<typeof searchSemanticSeeds>> | undefined
     try {
-      const vector = await searchSemanticContext(fs, semantic!, { query: query!, path, limit: 4, expand_relations: false },
+      vector = await searchSemanticSeeds(fs, semantic!, { query: query!, path, limit: 4 },
         { cwd, signal: exec.signal })
+    } catch (error) {
+      exec.signal.throwIfAborted()
+      const reason = error instanceof Error ? error.message : String(error)
+      result.vectorStatus = /stale/.test(reason) ? 'stale' : /invalid or incompatible/.test(reason) ? 'invalid' : 'unavailable'
+      if (terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
+      mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
+    }
+    if (vector) {
       result.usedVector = true
       result.queryEmbeddings = vector.queryEmbeddings
-      result.vectorHits = vector.hits.length
-      for (const hit of vector.hits) {
-        const file = workspacePath(hit.path)
+      result.vectorHits = vector.seeds.length
+      result.vectorStatus = vector.seeds.length ? 'ok' : 'empty'
+      for (const seed of vector.seeds) {
+        const file = workspacePath(seed.path)
         if (!supported.test(file)) continue
         let entry = files.get(file)
-        if (!entry) { entry = { hits: [], terms: new Set(), seeds: new Set() }; files.set(file, entry) }
-        if (Number.isSafeInteger(hit.startLine) && hit.startLine >= 1) entry.seeds.add(hit.startLine)
+        if (!entry) { entry = { hits: [], terms: new Set(), seeds: [] }; files.set(file, entry) }
+        entry.seeds.push({ startLine: seed.startLine, endLine: seed.endLine, rank: seed.rank, score: seed.score })
       }
-      if (vector.truncated) mark(`vector candidates partial: ${vector.limits.join('; ')}`)
+      if (vector.truncated) {
+        const shown = vector.limits.slice(0, 8)
+        mark(`vector candidate limits: ${shown.join('; ')}${vector.limits.length > shown.length ? `; +${vector.limits.length - shown.length} more` : ''}`)
+      }
       result.candidateFiles = files.size
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error)
-      if (mode === 'hybrid' || terms.length === 0) throw new Error(`semantic candidates unavailable: ${reason}`)
-      mark(`semantic candidates unavailable; lexical fallback: ${reason}`)
     }
   }
   // Validate every candidate before dropping any due to a resource budget.
@@ -357,18 +434,25 @@ export async function searchCodeContext(
     const candidate = declarationHit ?? withTerm[0]
     if (candidate) selected.add(candidate)
   }
-  const vectorCandidates = candidates.filter(candidate => candidate.entry.seeds.size > 0)
-  // Keep at most two slots for vector seeds when both backends are active.
-  const lexicalCap = terms.length && useVector ? Math.max(0, MAX_FILES - Math.min(2, vectorCandidates.length)) : MAX_FILES
-  for (const candidate of candidates) {
+  const vectorOnly = candidates.filter(candidate => candidate.entry.terms.size === 0 && candidate.entry.seeds.length > 0)
+    .sort((a, b) => Math.min(...a.entry.seeds.map(seed => seed.rank)) - Math.min(...b.entry.seeds.map(seed => seed.rank)))
+  const lexicalCandidates = candidates.filter(candidate => candidate.entry.terms.size > 0)
+  // Reserve at most two slots for vector-only files, and only when they are not already lexical picks.
+  const lexicalCap = terms.length && useVector ? Math.max(0, MAX_FILES - Math.min(2, vectorOnly.length)) : MAX_FILES
+  for (const candidate of lexicalCandidates) {
     if (selected.size >= lexicalCap) break
     selected.add(candidate)
   }
-  for (const candidate of vectorCandidates) {
+  for (const candidate of vectorOnly) {
+    if (selected.size >= MAX_FILES) break
+    selected.add(candidate)
+  }
+  for (const candidate of candidates) {
     if (selected.size >= MAX_FILES) break
     selected.add(candidate)
   }
   if (candidates.length > MAX_FILES) mark('candidate file limit (12)')
+  result.vectorOnlyFiles = [...selected].filter(candidate => candidate.entry.terms.size === 0 && candidate.entry.seeds.length > 0).length
   const units: ContextUnit[] = []
   for (const { file, entry, target } of selected) {
     exec.signal.throwIfAborted()
@@ -392,33 +476,33 @@ export async function searchCodeContext(
     // grep uses LF records, while TypeScript also treats these as line breaks.
     if (/\r(?!\n)|[\u2028\u2029]/.test(source)) { skip('unsupported line separators; use explicit file reading'); continue }
     const lines = source.split('\n')
-    const hits = entry.hits.length
-      ? entry.hits.filter(hit => {
-        let current = lines[hit.line - 1]
-        // rg strips CR only when it belongs to a CRLF terminator, not at EOF.
-        if (hit.line < lines.length) current = current?.replace(/\r$/, '')
-        let searched = hit.text
-        if (hit.line === 1) {
-          current = current?.replace(/^\uFEFF/, '')
-          searched = searched.replace(/^\uFEFF/, '')
-        }
-        return current === searched && terms.some(term => hit.text.includes(term))
-      })
-      : [...entry.seeds].sort((a, b) => a - b).filter(line => line <= lines.length)
-        .map(line => ({ line, text: lines[line - 1] }))
-    if (entry.hits.length && hits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
+    const lexicalHits = entry.hits.filter(hit => {
+      let current = lines[hit.line - 1]
+      // rg strips CR only when it belongs to a CRLF terminator, not at EOF.
+      if (hit.line < lines.length) current = current?.replace(/\r$/, '')
+      let searched = hit.text
+      if (hit.line === 1) {
+        current = current?.replace(/^\uFEFF/, '')
+        searched = searched.replace(/^\uFEFF/, '')
+      }
+      return current === searched && terms.some(term => hit.text.includes(term))
+    })
+    if (entry.hits.length && lexicalHits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
+    const seedHits = entry.seeds.filter(seed => seed.startLine <= lines.length)
+      .map(seed => ({ line: seed.startLine, text: lines[seed.startLine - 1] ?? '', seed }))
+    if (seedHits.length !== entry.seeds.length) mark('vector seed line outside current source')
+    const hits = [...lexicalHits, ...seedHits]
     if (!hits.length) { skip('no verified or seeded source line'); continue }
     const nextUnits = sourceUnits(file, source, hits, terms, limit, exec.signal, mark)
-    if (entry.seeds.size) {
-      for (const unit of nextUnits) for (const fragment of unit.fragments) fragment.seededByVector = true
-    }
     units.push(...nextUnits)
   }
   const score = (unit: ContextUnit) => (terms.includes(unit.name) ? 1000 : 0)
     + unit.terms.reduce((n, term) => n + termWeight(term), 0)
       * (unit.fragments[0].source === 'declaration-context' || unit.fragments[0].source === 'declaration-partial' ? 2 : 1)
 
-  units.sort((a, b) => score(b) - score(a) || a.path.localeCompare(b.path) || a.start - b.start)
+  units.sort((a, b) => Number(a.origin === 'vector') - Number(b.origin === 'vector')
+    || score(b) - score(a) || (a.seedRank ?? 0) - (b.seedRank ?? 0)
+    || a.path.localeCompare(b.path) || a.start - b.start)
   if (units.length > MAX_WINDOWS) mark('candidate context limit (120)')
   const remaining = units.slice(0, MAX_WINDOWS)
   const represented = new Set<string>()
@@ -432,22 +516,33 @@ export async function searchCodeContext(
     }
     return false
   }
+  const overlaps = (fragment: CodeFragment) => result.fragments.some(old => old.path === fragment.path
+    && old.startLine <= fragment.endLine && old.endLine >= fragment.startLine)
+  const vectorShown = new Set<string>()
   let textBytes = 0
   while (remaining.length) {
     exec.signal.throwIfAborted()
-    // Exact declaration anchors precede diversification; then prefer an unseen file.
-    let index = remaining.findIndex(unit => terms.includes(unit.name))
+    // Lexical declaration anchors precede diversification; vector units fill remaining slots.
+    let index = remaining.findIndex(unit => unit.origin !== 'vector' && terms.includes(unit.name))
+    if (index < 0) index = remaining.findIndex(unit => unit.origin !== 'vector' && !represented.has(unit.path))
     if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
     if (index < 0) index = 0
     const unit = remaining.splice(index, 1)[0]
-    // Covered ranges add no source; partial overlap only adds the uncovered pieces.
-    const additions = unit.fragments.filter(fragment => !covered(fragment))
+    if (unit.origin === 'vector' && vectorShown.has(unit.path)) continue
+    const available = unit.fragments.filter(fragment => !covered(fragment) && !overlaps(fragment))
+    // A vector seed must show the fragment that actually intersects its range, not just the declaration head.
+    const seedFragment = unit.origin === 'vector' ? available.find(fragment => fragment.seededByVector) : undefined
+    const additions = unit.origin === 'vector'
+      ? (seedFragment ? [seedFragment] : [])
+      : available
     if (!additions.length) continue
     const size = additions.reduce((n, fragment) => n + encoder.encode(fragment.text).byteLength, 0)
     if (result.fragments.length + additions.length > limit || textBytes + size > MAX_TEXT_BYTES) {
       mark('result context omitted by fragment/text budget'); continue
     }
     textBytes += size; result.fragments.push(...additions); represented.add(unit.path)
+    if (unit.origin === 'vector') vectorShown.add(unit.path)
+    result.vectorSeededFragments += additions.filter(fragment => fragment.seededByVector).length
   }
   const selectedFiles = new Set([...selected].map(candidate => candidate.file))
   result.terms = terms.map(term => {
