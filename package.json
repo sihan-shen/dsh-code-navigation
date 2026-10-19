@@ -15,9 +15,17 @@
       "import": "./dist/semantic/index.js"
     }
   },
+  "files": [
+    "dist",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc",
+    "prepare": "pnpm build",
+    "prepack": "pnpm build"
   },
   "dependencies": {
     "typescript": "6.0.3"
@@ -42,6 +50,15 @@
     },
     "@deepseek-ai/dsh-system-prompt": {
       "optional": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sihan-shen/dsh-code-navigation.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
     }
   }
 }

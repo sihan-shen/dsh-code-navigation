@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-code-navigation
+      name: dsh-code-navigation
+      config:
+        enableCodeContext: true

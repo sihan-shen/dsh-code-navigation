@@ -1,5 +1,7 @@
 # dsh-code-navigation
 
+[![CI](https://github.com/sihan-shen/dsh-code-navigation/actions/workflows/ci.yml/badge.svg)](https://github.com/sihan-shen/dsh-code-navigation/actions/workflows/ci.yml)
+
 Code navigation and retrieval toolkit for DeepSeek Harness.
 
 本项目是一个单包 Cordis 插件：默认提供 TypeScript/JavaScript 语法声明定位；按需启用词法 RAG、固定文件语义索引、Hybrid 词法+向量检索、子系统概览、声明引用和批量 LSP 定义导航。所有检索工具只负责召回和整理源码证据，不调用生成模型；是否使用字面搜索、AST、向量或 LSP 由工具与配置显式区分。
@@ -229,7 +231,7 @@ pnpm typecheck
 pnpm build
 ```
 
-项目工作约定见 [AGENTS.md](AGENTS.md)。修改检索协议、工具 schema 或语义索引格式时，应同步更新本 README 和相关设计文档。
+项目工作约定见 [AGENTS.md](AGENTS.md)。CI 检查与本地等价命令见 [.github/CI.md](.github/CI.md)。修改检索协议、工具 schema 或语义索引格式时，应同步更新本 README 和相关设计文档。
 
 ## License
 

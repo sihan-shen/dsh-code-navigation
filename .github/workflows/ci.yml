@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify package and bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+      - name: Validate bundle metadata
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const fail = message => { console.error(`::error::${message}`); process.exit(1) }
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
+          if (pkg.name !== 'dsh-code-navigation') fail('unexpected package name')
+          if (pkg.description === undefined || pkg.description.length >= 120) fail('description must be present and under 120 characters')
+          if (pkg.license !== 'MIT') fail('license must be MIT')
+          if (!pkg.repository || typeof pkg.repository.url !== 'string' || !pkg.repository.url.includes('dsh-code-navigation')) fail('repository must point at dsh-code-navigation')
+          const patch = pkg.dsh?.bundle?.patch
+          if (typeof patch !== 'string' || !fs.existsSync(patch)) fail('dsh.bundle.patch must exist')
+          const patchSource = fs.readFileSync(patch, 'utf8')
+          if (!patchSource.includes('id: dsh-code-navigation') || !patchSource.includes('name: dsh-code-navigation')) fail('bundle patch must install dsh-code-navigation')
+          for (const peer of ['@deepseek-ai/dsh-fs', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-system-prompt']) {
+            const range = pkg.peerDependencies?.[peer]
+            if (typeof range !== 'string' || !range.includes('0.2.0-rc.2') || !range.includes('0.2.1-rc.2')) fail(`${peer} must contain explicit 0.2.0/0.2.1 prerelease branches`)
+          }
+          if (!fs.existsSync(path.join('dist', 'index.js'))) fail('dist/index.js is missing; run pnpm build')
+          console.log('package/bundle metadata ok')
+          NODE
+
+      - name: Check package contents
+        run: |
+          npm pack --dry-run --json > pack.json
+          node <<'NODE'
+          const fs = require('node:fs')
+          const pack = JSON.parse(fs.readFileSync('pack.json', 'utf8'))
+          const files = new Set(pack[0].files.map(file => file.path))
+          for (const required of ['dist/index.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
+            if (!files.has(required)) { console.error(`::error::package is missing ${required}`); process.exit(1) }
+          }
+          console.log('package contents ok:', [...files].length, 'files')
+          NODE
+
+      - name: Check bundle installability
+        run: |
+          test -f cordis.patch.yml
+          grep -q 'id: dsh-code-navigation' cordis.patch.yml
+          grep -q 'name: dsh-code-navigation' cordis.patch.yml
