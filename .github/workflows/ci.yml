@@ -62,7 +62,7 @@ jobs:
 
       - name: Check package contents
         run: |
-          npm pack --dry-run --json > pack.json
+          npm pack --dry-run --json --ignore-scripts > pack.json
           node <<'NODE'
           const fs = require('node:fs')
           const pack = JSON.parse(fs.readFileSync('pack.json', 'utf8'))
