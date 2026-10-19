@@ -50,7 +50,7 @@ pnpm typecheck
 pnpm build
 ```
 
-当前为私有本地包，未发布到公共 registry。安装完成后，在宿主 Cordis Context 上加载构建入口，替换为实际绝对路径：
+当前为私有本地包，未发布到公共 registry。`peerDependencies` 兼容 DSH `0.2.0-rc.2`、`0.2.1-rc.2` 及 `0.2.x` stable；更新的 prerelease 需要重新验证。实际运行验证使用 DSH `0.2.1-rc.2`。安装完成后，在宿主 Cordis Context 上加载构建入口，替换为实际绝对路径：
 
 ```ts
 import * as codeNavigation from '/absolute/path/to/dsh-code-navigation/dist/index.js'
