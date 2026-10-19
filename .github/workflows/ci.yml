@@ -62,10 +62,14 @@ jobs:
 
       - name: Check package contents
         run: |
-          npm pack --dry-run --json --ignore-scripts > pack.json
+          npm pack --dry-run --json --ignore-scripts > pack.raw
           node <<'NODE'
           const fs = require('node:fs')
-          const pack = JSON.parse(fs.readFileSync('pack.json', 'utf8'))
+          const raw = fs.readFileSync('pack.raw', 'utf8')
+          const start = raw.indexOf('[')
+          const end = raw.lastIndexOf(']')
+          if (start < 0 || end <= start) { console.error('::error::npm pack did not emit JSON'); process.exit(1) }
+          const pack = JSON.parse(raw.slice(start, end + 1))
           const files = new Set(pack[0].files.map(file => file.path))
           for (const required of ['dist/index.js', 'cordis.patch.yml', 'README.md', 'LICENSE']) {
             if (!files.has(required)) { console.error(`::error::package is missing ${required}`); process.exit(1) }
