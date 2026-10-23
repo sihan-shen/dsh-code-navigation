@@ -9,6 +9,7 @@ const utf8Bytes = (text: string): number => new TextEncoder().encode(text).byteL
 
 function renderBatch(value: BatchDefinitions): string {
   const groups = new Map<string, { id: string; path: string; hash: string; essential: Set<number>; rows: Map<number, { line: number; text: string; truncated: boolean }> }>()
+  const demands = new Map<string, { id: string; essential: number[]; rows: number[] }>()
   const evidenceFor = (target: BatchDefinitions['items'][number]['targets'][number]): string => {
     const key = JSON.stringify([target.path, target.sha256])
     let group = groups.get(key)
@@ -18,6 +19,8 @@ function renderBatch(value: BatchDefinitions): string {
     }
     for (const n of target.evidenceRows) group.essential.add(n)
     for (const row of target.lines) group.rows.set(row.line, row)
+    const rows = target.lines.map(row => row.line)
+    demands.set(JSON.stringify([group.id, target.evidenceRows, rows]), { id: group.id, essential: target.evidenceRows, rows })
     return group.id
   }
   const blocks = value.items.map(item => {
@@ -45,17 +48,31 @@ function renderBatch(value: BatchDefinitions): string {
   const reserved = utf8Bytes([intro, ...blocks.flatMap(b => b.headers), ...labels.values()].join('\n') + footer(value.sourceRows))
   if (reserved > DEFINITION_LIMITS.renderBytes) throw new Error('Metadata render budget exceeded')
   let remaining = DEFINITION_LIMITS.renderBytes - reserved, text = intro, shown = 0
-  const planned = new Map<string, { line: number; row: string }[]>()
-  // All targets' exact/member/container evidence precedes any ordinary window rows.
-  for (const essential of [true, false]) for (const group of groups.values()) {
-    const rendered = planned.get(group.id) ?? []
-    planned.set(group.id, rendered)
-    for (const line of [...group.rows.values()].sort((a, b) => a.line - b.line)) {
-      if (group.essential.has(line.line) !== essential) continue
-      const row = `\n${line.line}: ${line.text}${line.truncated ? ' [line truncated]' : ''}`
-      const bytes = utf8Bytes(row)
-      if (bytes > remaining) continue
-      remaining -= bytes; rendered.push({ line: line.line, row }); shown++
+  const planned = new Map([...groups.values()].map(group => [group.id, [] as { line: number; row: string }[]]))
+  const byId = new Map([...groups.values()].map(group => [group.id, group]))
+  const included = new Set<string>()
+  // Match the source allocator: one new row per distinct target per round, essentials first.
+  for (const essential of [true, false]) {
+    const queues = [...demands.values()].map(demand => ({
+      id: demand.id, next: 0, rows: essential ? demand.essential : demand.rows,
+    }))
+    let added = true
+    while (added) {
+      added = false
+      for (const queue of queues) {
+        const group = byId.get(queue.id)!
+        while (queue.next < queue.rows.length) {
+          const n = queue.rows[queue.next++], line = group.rows.get(n)
+          const key = JSON.stringify([group.id, n])
+          if (!line || included.has(key) || group.essential.has(n) !== essential) continue
+          const row = `\n${line.line}: ${line.text}${line.truncated ? ' [line truncated]' : ''}`
+          const bytes = utf8Bytes(row)
+          if (bytes > remaining) continue
+          remaining -= bytes; planned.get(group.id)!.push({ line: n, row }); shown++
+          included.add(key); added = true
+          break
+        }
+      }
     }
   }
   const emitted = new Set<string>()

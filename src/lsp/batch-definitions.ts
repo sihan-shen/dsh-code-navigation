@@ -72,6 +72,45 @@ interface Source {
   lines: string[]
   sha256: string
 }
+interface SourcePlan {
+  target: DefinitionTarget
+  source: Source
+  wanted: number[]
+}
+
+function allocateSourceRows(items: DefinitionItem[], plans: SourcePlan[]): number {
+  const included = new Set<string>()
+  const keyFor = (target: DefinitionTarget, line: number): string => JSON.stringify([target.path, target.sha256, line])
+  // Identical demands share a turn as well as their rows; duplicate cursors gain no extra quota.
+  const unique = [...new Map(plans.map(plan => [
+    JSON.stringify([plan.target.path, plan.target.sha256, plan.target.evidenceRows, plan.wanted]), plan,
+  ])).values()]
+  for (const essential of [true, false]) {
+    const queues = unique.map(plan => ({ plan, rows: essential ? plan.target.evidenceRows : plan.wanted, next: 0 }))
+    let added = true
+    while (added && included.size < DEFINITION_LIMITS.sourceRows) {
+      added = false
+      for (const queue of queues) {
+        while (queue.next < queue.rows.length) {
+          const key = keyFor(queue.plan.target, queue.rows[queue.next++])
+          if (included.has(key)) continue
+          included.add(key); added = true
+          break
+        }
+        if (included.size >= DEFINITION_LIMITS.sourceRows) break
+      }
+    }
+  }
+  for (const { target, source, wanted } of plans) {
+    target.lines = wanted.filter(n => included.has(keyFor(target, n))).sort((a, b) => a - b)
+      .map(n => ({ line: n, text: source.lines[n - 1].slice(0, 240), truncated: source.lines[n - 1].length > 240 }))
+    target.contextComplete = target.lines.length === wanted.length
+  }
+  for (const item of items) {
+    if (item.status === 'ok' && item.targets.some(target => !target.contextComplete)) item.status = 'partial'
+  }
+  return included.size
+}
 
 // Decode only this filesystem's workspace URI namespace; resolve/contains checks follow.
 function workspacePath(uri: string, rootUri: string): string | undefined {
@@ -178,8 +217,10 @@ export async function findBatchDefinitions(
   const seen = new Map<string, number>()
   let lspQueries = 0
   const responses: { item: DefinitionItem; locations: readonly LspLocation[] }[] = []
-  let sourceRows = 0, waveStart = 0, internalQueries = 0
-  const includedRows = new Set<string>()
+  let waveStart = 0, internalQueries = 0
+  const plans: SourcePlan[] = []
+  // Preserve the existing continuation admission budget independently of final evidence allocation.
+  const navigationRows = new Set<string>()
   const scheduledRoutes = new Map<string, number>()
   const initialOmissions = new Map<number, number>()
   for (let depth = 0; depth <= 2; depth++) {
@@ -276,29 +317,25 @@ export async function findBatchDefinitions(
             && (sourceLine > start.line || sourceLine === start.line && sourceCharacter >= start.character)
             && (sourceLine < end.line || sourceLine === end.line && sourceCharacter < end.character)
           const first = Math.max(1, start.line - 1), last = Math.min(value.lines.length, start.line + 15)
-          // Prioritize exact member/container evidence, then its bounded ordinary window.
-          // Repeated rows consume the call's row budget only once, including overlaps.
-          const wanted = [...new Set([start.line + 1, ...(syntax?.rows ?? []), ...identityRows,
+          const evidenceRows = [...new Set([start.line + 1, ...(syntax?.rows ?? []), ...identityRows])]
+          const wanted = [...new Set([...evidenceRows,
             ...Array.from({ length: last - first + 1 }, (_, i) => first + i)])]
-          const lines: DefinitionTarget['lines'] = []
           for (const n of wanted) {
-            const key = JSON.stringify([canonicalPath, value.sha256, n])
-            if (!includedRows.has(key)) {
-              if (sourceRows >= DEFINITION_LIMITS.sourceRows) continue
-              includedRows.add(key); sourceRows++
-            }
-            lines.push({ line: n, text: value.lines[n - 1].slice(0, 240), truncated: value.lines[n - 1].length > 240 })
+            if (navigationRows.size >= DEFINITION_LIMITS.sourceRows) break
+            navigationRows.add(JSON.stringify([canonicalPath, value.sha256, n]))
           }
-          lines.sort((a, b) => a.line - b.line)
-          item.targets.push({
+          // Retain row numbers and the already bounded source, not per-target copies of its text.
+          const evidence: DefinitionTarget = {
             path: canonicalPath, uri: loc.uri, line: start.line + 1, character: start.character + 1,
             name: identity?.name ?? syntax?.name ?? decl?.name ?? '', kind: identity?.kind ?? syntax?.kind ?? decl?.kind ?? 'unknown', container: identity?.container ?? syntax?.container ?? decl?.container ?? '',
             declarationLine: identity?.line ?? start.line + 1, declarationCharacter: identity?.character ?? start.character + 1,
-            sha256: value.sha256, lines, contextComplete: lines.length === wanted.length,
-            evidenceRows: [start.line + 1, ...(syntax?.rows ?? []), ...identityRows],
+            sha256: value.sha256, lines: [], contextComplete: false,
+            evidenceRows,
             evidenceNotes: syntax?.notes ?? [],
             relation: self ? 'self' : 'definition',
-          })
+          }
+          item.targets.push(evidence)
+          plans.push({ target: evidence, source: value, wanted })
           if (q.follow?.length !== 0 && !self) {
             const selections = (selector ? [selector] : [...CONTINUATION_SELECTORS]).map(step => ({ step, result: selectContinuation(parsed, start.line + 1, start.character + 1, step) })).filter(s => s.result.supported)
             const bodiesHere = new Set(selections.map(s => s.result.bodyKey))
@@ -337,7 +374,7 @@ export async function findBatchDefinitions(
       const routeKey = JSON.stringify([call.file_path, call.line, call.character, automatic ? undefined : q.follow!.slice(1)])
       const shared = scheduledRoutes.get(routeKey)
       if (shared !== undefined) { item.routeStatus = 'queued'; item.routeNote = `${selectedSelector} selected unique use; shared next query ${shared + 1}`; continue }
-      if (internalQueries >= 4 || depth >= 2 || sourceRows >= DEFINITION_LIMITS.sourceRows) { item.routeStatus = 'stopped'; item.routeNote = 'Continuation depth/query/source budget exhausted'; continue }
+      if (internalQueries >= 4 || depth >= 2 || navigationRows.size >= DEFINITION_LIMITS.sourceRows) { item.routeStatus = 'stopped'; item.routeNote = 'Continuation depth/query/source budget exhausted'; continue }
       scheduledRoutes.set(routeKey, cursors.length)
       internalQueries++
       item.routeStatus = 'queued'; item.routeNote = `${selectedSelector} selected unique use; next query ${cursors.length + 1}`
@@ -348,6 +385,9 @@ export async function findBatchDefinitions(
     }
     if (waveStart === cursors.length) break
   }
+  const items = responses.map(r => r.item)
+  // Allocate across every collected wave only after continuation decisions are complete.
+  const sourceRows = allocateSourceRows(items, plans)
   signal.throwIfAborted()
   // Check each read file once at the end instead of re-statting it on every cached access.
   for (const [key, value] of texts) {
@@ -355,6 +395,6 @@ export async function findBatchDefinitions(
       throw new Error('Source changed during navigation; retry with current coordinates')
     }
   }
-  return { items: responses.map(r => r.item), lspQueries, bytesRead, sourceRows,
+  return { items, lspQueries, bytesRead, sourceRows,
     omittedTargets: responses.reduce((n, r) => n + r.item.omitted, 0) }
 }
