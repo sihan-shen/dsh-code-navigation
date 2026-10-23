@@ -14,9 +14,11 @@ const SUPPORTED_FILE = /\.(?:ts|tsx|js|jsx)$/i
 
 export interface SearchResult {
   filesScanned: number
+  scanComplete: boolean
   declarations: Declaration[]
   nameResults: {
     name: string
+    observed: number
     shown: number
     completeness: 'complete' | 'partial' | 'unscanned'
     incompleteReasons: string[]
@@ -89,13 +91,14 @@ export async function findDeclarations(
   if (!cwd) throw new Error('A Harness Session workspace is required')
   exec.signal.throwIfAborted()
   const candidates = args.files === undefined ? await discoverFiles(tools, names, exec) : args.files
-  const result: SearchResult = { filesScanned: 0, declarations: [], nameResults: [], skipped: [], truncated: false }
+  const result: SearchResult = { filesScanned: 0, scanComplete: false, declarations: [], nameResults: [], skipped: [], truncated: false }
   const retained = new Map([...names].map(name => [name, [] as Declaration[]]))
+  const observed = new Map([...names].map(name => [name, 0]))
   const omitted = new Set<string>()
   const scanReasons: string[] = []
   let nodesRemaining = MAX_SCAN_NODES
   if (candidates.length === 0 && args.files === undefined) {
-    result.nameResults = [...names].map(name => ({ name, shown: 0, completeness: 'unscanned',
+    result.nameResults = [...names].map(name => ({ name, observed: 0, shown: 0, completeness: 'unscanned',
       incompleteReasons: ['no candidate files discovered; no AST scan performed'] }))
     result.truncated = true
     return result
@@ -145,6 +148,7 @@ export async function findDeclarations(
     const slots = new Map([...retained].map(([name, items]) => [name, MAX_RESULTS - items.length]))
     const scan = scanDeclarations(path, source, slots, nodesRemaining)
     nodesRemaining -= scan.nodesVisited
+    for (const [name, count] of scan.observedCounts) observed.set(name, observed.get(name)! + count)
     for (const item of scan.declarations) retained.get(item.name)!.push(item)
     for (const name of scan.omittedNames) omitted.add(name)
     if (scan.syntaxError) scanReasons.push(`syntax recovery in ${path}`)
@@ -163,11 +167,12 @@ export async function findDeclarations(
   }
   const commonReasons = [...scanReasons]
   if (result.skipped.length) commonReasons.push('candidate files skipped; see skipped')
+  result.scanComplete = result.filesScanned > 0 && commonReasons.length === 0
   result.nameResults = [...retained].map(([name, items]) => {
     const shown = result.declarations.filter(item => item.name === name).length
     const incompleteReasons = [...commonReasons]
     if (omitted.has(name) || shown < items.length) incompleteReasons.push('30-result budget; additional candidates omitted')
-    return { name, shown, completeness: result.filesScanned === 0 ? 'unscanned'
+    return { name, observed: observed.get(name)!, shown, completeness: result.filesScanned === 0 ? 'unscanned'
       : incompleteReasons.length ? 'partial' : 'complete', incompleteReasons }
   })
   result.truncated = result.nameResults.some(item => item.completeness !== 'complete')

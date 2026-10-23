@@ -84,6 +84,7 @@ export function isDeclarationName(name: string): boolean {
 
 export interface DeclarationScan {
   declarations: Declaration[]
+  observedCounts: ReadonlyMap<string, number>
   omittedNames: string[]
   syntaxError: boolean
   nodesVisited: number
@@ -96,8 +97,9 @@ export function scanDeclarations(
 ): DeclarationScan {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
   const lineStarts = file.getLineStarts()
+  const observedCounts = new Map([...slots.keys()].map(name => [name, 0]))
   const result: DeclarationScan = {
-    declarations: [], omittedNames: [], nodesVisited: 0, incompleteReasons: [],
+    declarations: [], observedCounts, omittedNames: [], nodesVisited: 0, incompleteReasons: [],
     syntaxError: !!(file as ts.SourceFile & { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length,
   }
   const retained = new Map<string, number>()
@@ -109,6 +111,7 @@ export function scanDeclarations(
     const identifier = declarationName(node), kind = declarationKind(node)
     if (identifier && kind && slots.has(identifier.text)) {
       const name = identifier.text, count = retained.get(name) ?? 0
+      observedCounts.set(name, observedCounts.get(name)! + 1)
       if (count >= slots.get(name)!) omitted.add(name)
       else {
         retained.set(name, count + 1)
