@@ -9,20 +9,25 @@ import type { SemanticIndexConfig } from '../semantic/types.js'
 
 export function renderCodeContext(value: ContextResult): string {
   const bytes = (text: string) => new TextEncoder().encode(text).byteLength
+  const renderLimit = 10 * 1024
   const limitText = value.limits.join('; ')
   const boundedLimits = bytes(limitText) > 1800 ? `${limitText.slice(0, 900)} …` : limitText
   const vectorInfo = value.vectorStatus !== 'off'
-    ? `Vector ${value.vectorStatus}/${value.vectorTrigger}: ${value.vectorHits} hits, ${value.queryEmbeddings} query embedding(s), ${value.vectorOnlyFiles} selected vector-only file(s), ${value.vectorSeededFragments} selected vector-seeded fragment(s), ${value.seedCoveredFragments} fully seed-covered. `
+    ? ` Vector ${value.vectorStatus}/${value.vectorTrigger}: ${value.vectorHits} hits, ${value.queryEmbeddings} query embedding(s); selected ${value.vectorSeededFragments} vector fragment(s), ${value.seedCoveredFragments} internally seed-covered (not visible-body coverage).`
     : ''
-  const parts = [`${value.usedVector ? 'Lexical + vector candidates' : 'Lexical candidates only'}; ${value.matchesFound} matched lines in ${value.candidateFiles} files; ${vectorInfo}read ${value.filesRead} files / ${value.bytesRead} bytes. Selected ${value.fragments.length} source fragments; only displayed fragments below are available. Vector-seeded fragments are navigation cards: the first card (primary) carries up to 2KiB body; later cards are supporting pointers with ranges/anchors only. Read a supporting card only when the primary card lacks a requested fact. Lexical fragments keep full bounded source. Declaration-context pieces jointly cover their stated context range; declaration-partial pieces keep a declaration head, hit neighborhood and omitted range. Anchors use 1-based UTF-16 columns. ${value.truncated ? `Partial coverage: ${boundedLimits}.` : 'All search candidates processed.'}`]
-  let used = bytes(parts[0])
-  const coverage = value.terms.map(term => `${term.term}: ${term.selectedFragments} fragment(s)/${term.anchorFragments} anchor(s), ${term.matchedLines} line(s)/${term.matchedFiles} file(s)${term.omittedReason ? ` — ${term.omittedReason}` : ''}`).join('; ')
-  if (coverage) {
-    const text = `Term coverage: ${coverage}`
-    if (used + bytes(text) + 1 <= 10 * 1024) { parts.push(text); used += bytes(text) + 1 }
-  }
-  let omitted = 0
-  let vectorCards = 0
+  const intro = `${value.usedVector ? 'Lexical + vector candidates' : 'Lexical candidates only'}; ${value.matchesFound} matched lines in ${value.candidateFiles} files; read ${value.filesRead} files / ${value.bytesRead} bytes. Selected ${value.fragments.length} source fragments.${vectorInfo} Numbered body lines are visible source; pointer previews/anchors only locate source. Seed coverage describes selected ranges, not displayed text or answer completeness. Reuse shown source; read only a requested gap. Coordinates are 1-based UTF-16. ${value.truncated ? `Partial search coverage: ${boundedLimits}.` : 'All search candidates processed.'}`
+  type VisibleFragment = { fragment: ContextResult['fragments'][number]; body: string; bodyLines: number }
+  const visible: VisibleFragment[] = []
+  const coverageText = (planned: boolean): string => value.terms.map(term => {
+    const bodies = planned ? value.fragments.length : visible.filter(item => item.bodyLines > 0 && item.body.includes(term.term)).length
+    const anchors = planned ? value.fragments.length : visible.filter(item => item.fragment.anchors.some(anchor => anchor.name === term.term)).length
+    return `${term.term}: matched ${term.matchedLines} lines/${term.matchedFiles} files; selected ${term.selectedFragments} fragments; visible body ${bodies} fragments/locator anchors ${anchors}${term.omittedReason ? `; ${term.omittedReason}` : ''}`
+  }).join('; ')
+  // Reserve final coverage and summary before accepting atomic declaration groups.
+  const coverageReserve = value.terms.length ? bytes('Term coverage: ' + coverageText(true)) + 1 : 0
+  let used = bytes(intro) + coverageReserve + 512
+  const parts = [intro]
+  let omitted = 0, vectorCards = 0
   const groups = new Map<string, ContextResult['fragments']>()
   for (const fragment of value.fragments) {
     const key = `${fragment.path}:${fragment.contextStartLine}:${fragment.contextEndLine}`
@@ -30,54 +35,73 @@ export function renderCodeContext(value: ContextResult): string {
     group.push(fragment); groups.set(key, group)
   }
   for (const group of groups.values()) {
-    const text = group.map(fragment => {
-      const seed = fragment.seedStartLine !== undefined ? `; seed ${fragment.seedStartLine}-${fragment.seedEndLine} (${fragment.seedCoverage})` : ''
+    let plannedCards = vectorCards
+    const planned: VisibleFragment[] = []
+    let text = group.map(fragment => {
+      const seed = fragment.seedStartLine !== undefined ? `; selected seed ${fragment.seedStartLine}-${fragment.seedEndLine} (${fragment.seedCoverage})` : ''
       const anchors = fragment.anchors.length
-        ? `; anchors ${fragment.anchors.map(anchor => `${anchor.kind}:${anchor.name}@${anchor.line}:${anchor.character}`).join(', ')}`
+        ? `; locator anchors ${fragment.anchors.map(anchor => `${anchor.kind}:${anchor.name}@${anchor.line}:${anchor.character}`).join(', ')}`
         : ''
+      const lines = fragment.text.split('\n')
+      const numbered = (list: string[], from: number) => list.map((line, i) => `${from + i} | ${line}`).join('\n')
       if (value.usedVector && fragment.seededByVector) {
-        const before = fragment.startLine > fragment.contextStartLine ? `; omitted-before ${fragment.contextStartLine}-${fragment.startLine - 1}` : ''
-        const after = fragment.endLine < fragment.contextEndLine ? `; omitted-after ${fragment.endLine + 1}-${fragment.contextEndLine}` : ''
-        const lines = fragment.text.split('\n')
-        const signatures = fragment.anchors.filter(anchor => anchor.kind === 'declaration').map(anchor => {
-          const line = lines[anchor.line - fragment.startLine]?.trim() ?? ''
-          return `${anchor.name}@${anchor.line} | ${line.slice(0, 240)}`
-        })
-        const numbered = (list: string[], from: number) => list.map((line, i) => `${from + i} | ${line}`).join('\n')
-        let evidence: string
-        if (vectorCards === 0) {
-          const body: string[] = []
+        const body: string[] = []
+        const primary = plannedCards === 0
+        if (primary) {
           let usedBytes = 0
           for (const line of lines) {
             const size = bytes(line) + 1
             if (usedBytes + size > 2000) break
             body.push(line); usedBytes += size
           }
-          evidence = `\n  body (top-1, ≤2KB):\n${numbered(body, fragment.startLine)}${body.length < lines.length ? '\n  …' : ''}`
-        } else {
-          const firstLine = lines.find(line => line.trim())?.trim().slice(0, 240) ?? ''
-          evidence = `\n  supporting pointer${firstLine ? `; first: ${firstLine}` : ''}; read only if the primary card lacks a requested fact.`
         }
-        vectorCards++
-        return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [navigation${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${before}${after}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]${signatures.length ? `\n  declaration: ${signatures.join(' / ')}` : ''}${evidence}\n  read ${fragment.path} ${fragment.startLine}-${fragment.endLine} for full body; do not infer unshown lines.`
+        plannedCards++
+        planned.push({ fragment, body: body.join('\n'), bodyLines: body.length })
+        const signatures = fragment.anchors.filter(anchor => anchor.kind === 'declaration').map(anchor => {
+          const line = lines[anchor.line - fragment.startLine]?.trim() ?? ''
+          return `${anchor.name}@${anchor.line} | ${line.slice(0, 240)}`
+        })
+        const bodyEnd = fragment.startLine + body.length - 1
+        const bodyRange = body.length ? `${fragment.startLine}-${bodyEnd}` : 'none'
+        const missingStart = fragment.startLine + body.length
+        const missing = missingStart <= fragment.endLine
+          ? `\n  Unshown body ${missingStart}-${fragment.endLine}; only if needed for a requested fact: read ${fragment.path} offset=${missingStart} limit=${fragment.endLine - missingStart + 1}.`
+          : ''
+        let evidence = body.length ? `\n${numbered(body, fragment.startLine)}` : ''
+        if (!primary) {
+          const first = lines.findIndex(line => line.trim())
+          if (first >= 0) evidence = `\n  preview ${fragment.startLine + first} | ${lines[first].trim().slice(0, 240)}`
+        }
+        return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${primary ? 'primary navigation' : 'supporting pointer'}${seed}; visible body ${bodyRange}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${anchors}]${signatures.length ? `\n  declaration preview: ${signatures.join(' / ')}` : ''}${evidence}${missing}`
       }
-      return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${fragment.source}${fragment.seededByVector ? '; vector-seeded' : ''}${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]\n${fragment.text.split('\n').map((line, i) => `${fragment.startLine + i} | ${line}`).join('\n')}`
+      planned.push({ fragment, body: fragment.text, bodyLines: lines.length })
+      return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${fragment.source}; visible body ${fragment.startLine}-${fragment.endLine}${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]\n${numbered(lines, fragment.startLine)}`
     }).join('\n')
-    // Rendering must not separate a declaration's associated pieces either.
-    if (used + bytes(text) + 256 > 10 * 1024) { omitted += group.length; continue }
+    const context = group[0], gaps: [number, number][] = []
+    let cursor = context.contextStartLine
+    for (const fragment of [...group].sort((a, b) => a.startLine - b.startLine)) {
+      if (fragment.startLine > cursor) gaps.push([cursor, fragment.startLine - 1])
+      cursor = Math.max(cursor, fragment.endLine + 1)
+    }
+    if (cursor <= context.contextEndLine) gaps.push([cursor, context.contextEndLine])
+    if (gaps.length) text += '\n  Unselected associated context in this group: ' + gaps.map(([start, end]) =>
+      `${start}-${end}; only if a requested fact needs it: read ${context.path} offset=${start} limit=${Math.min(40, end - start + 1)}`
+    ).join('; ') + '.'
+    if (used + bytes(text) + 1 > renderLimit) { omitted += group.length; continue }
+    // Only an accepted group consumes the primary card and visible coverage.
+    vectorCards = plannedCards
+    visible.push(...planned)
     parts.push(text); used += bytes(text) + 1
   }
   let skippedShown = 0
   for (const item of value.skipped) {
     const text = `Skipped ${item.path}: ${item.reason}`
-    if (used + bytes(text) + 1 > 10 * 1024) break
-    parts.push(text); used += bytes(text) + 1
-    skippedShown++
+    if (used + bytes(text) + 1 > renderLimit) break
+    parts.push(text); used += bytes(text) + 1; skippedShown++
   }
-  if (omitted || skippedShown < value.skipped.length) {
-    const note = `Rendering budget: ${omitted} source fragments and ${value.skipped.length - skippedShown} skipped-file details omitted.`
-    if (used + bytes(note) + 1 <= 10 * 1024) parts.push(note)
-  }
+  if (value.terms.length) parts.splice(1, 0, 'Term coverage: ' + coverageText(false))
+  const bodyFragments = visible.filter(item => item.bodyLines > 0).length
+  parts.splice(value.terms.length ? 2 : 1, 0, `Visible: ${bodyFragments} body fragment(s), ${visible.length - bodyFragments} pointer-only fragment(s); render omitted ${omitted} selected fragment(s), ${value.skipped.length - skippedShown} skipped-file details. Unshown context may still contain requested facts.`)
   return parts.join('\n')
 }
 
