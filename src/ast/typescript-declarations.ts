@@ -82,6 +82,57 @@ export function isDeclarationName(name: string): boolean {
   return extractDeclarations('query.ts', `let ${name} = 1`, new Set([name]), 1).length === 1
 }
 
+export interface DeclarationScan {
+  declarations: Declaration[]
+  omittedNames: string[]
+  syntaxError: boolean
+  nodesVisited: number
+  incompleteReasons: string[]
+}
+
+/** Scan independently of the output budget; retain only the requested slots per name. */
+export function scanDeclarations(
+  path: string, source: string, slots: ReadonlyMap<string, number>, nodeLimit: number,
+): DeclarationScan {
+  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
+  const lineStarts = file.getLineStarts()
+  const result: DeclarationScan = {
+    declarations: [], omittedNames: [], nodesVisited: 0, incompleteReasons: [],
+    syntaxError: !!(file as ts.SourceFile & { parseDiagnostics?: readonly unknown[] }).parseDiagnostics?.length,
+  }
+  const retained = new Map<string, number>()
+  const omitted = new Set<string>()
+  let depthLimited = false
+  function visit(node: ts.Node, container: string, depth: number): true | undefined {
+    if (result.nodesVisited >= nodeLimit) return true
+    result.nodesVisited++
+    const identifier = declarationName(node), kind = declarationKind(node)
+    if (identifier && kind && slots.has(identifier.text)) {
+      const name = identifier.text, count = retained.get(name) ?? 0
+      if (count >= slots.get(name)!) omitted.add(name)
+      else {
+        retained.set(name, count + 1)
+        const position = file.getLineAndCharacterOfPosition(identifier.getStart(file))
+        result.declarations.push({ name, path, line: position.line + 1, character: position.character + 1,
+          kind, container,
+          sourceLine: source.slice(lineStarts[position.line], lineStarts[position.line + 1] ?? source.length).trim().slice(0, 240) })
+      }
+    }
+    const next = identifier && (ts.isClassDeclaration(node) || ts.isInterfaceDeclaration(node)
+      || ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node))
+      ? (container ? container + '.' : '') + identifier.text : container
+    return ts.forEachChild(node, child => {
+      // Bound recursion without hiding the rest of the file's shallower declarations.
+      if (depth >= 256) { depthLimited = true; return undefined }
+      return visit(child, next, depth + 1)
+    })
+  }
+  if (visit(file, '', 0)) result.incompleteReasons.push('AST node budget exhausted')
+  if (depthLimited) result.incompleteReasons.push('AST nesting limit reached')
+  result.omittedNames = [...omitted]
+  return result
+}
+
 export function extractDeclarations(path: string, source: string, names: ReadonlySet<string>, limit: number): Declaration[] {
   const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
   const lineStarts = file.getLineStarts()

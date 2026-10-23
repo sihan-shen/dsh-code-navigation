@@ -1,6 +1,6 @@
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
-import { extractDeclarations, isDeclarationName } from '../ast/typescript-declarations.js'
+import { scanDeclarations, isDeclarationName } from '../ast/typescript-declarations.js'
 import type { Declaration } from '../ast/typescript-declarations.js'
 import { literalPattern } from './literal-pattern.js'
 import { isWorkspaceRelativePath } from '../workspace-path.js'
@@ -9,11 +9,18 @@ const MAX_FILES = 20
 const MAX_NAMES = 8
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_RESULTS = 30
+const MAX_SCAN_NODES = 200_000
 const SUPPORTED_FILE = /\.(?:ts|tsx|js|jsx)$/i
 
 export interface SearchResult {
   filesScanned: number
   declarations: Declaration[]
+  nameResults: {
+    name: string
+    shown: number
+    completeness: 'complete' | 'partial' | 'unscanned'
+    incompleteReasons: string[]
+  }[]
   skipped: { path: string; reason: string }[]
   truncated: boolean
 }
@@ -82,12 +89,25 @@ export async function findDeclarations(
   if (!cwd) throw new Error('A Harness Session workspace is required')
   exec.signal.throwIfAborted()
   const candidates = args.files === undefined ? await discoverFiles(tools, names, exec) : args.files
-  const result: SearchResult = { filesScanned: 0, declarations: [], skipped: [], truncated: false }
-  if (candidates.length === 0 && args.files === undefined) return result
+  const result: SearchResult = { filesScanned: 0, declarations: [], nameResults: [], skipped: [], truncated: false }
+  const retained = new Map([...names].map(name => [name, [] as Declaration[]]))
+  const omitted = new Set<string>()
+  const scanReasons: string[] = []
+  let nodesRemaining = MAX_SCAN_NODES
+  if (candidates.length === 0 && args.files === undefined) {
+    result.nameResults = [...names].map(name => ({ name, shown: 0, completeness: 'unscanned',
+      incompleteReasons: ['no candidate files discovered; no AST scan performed'] }))
+    result.truncated = true
+    return result
+  }
   const paths = validateFiles(candidates)
   const root = await fs.resolve('.', { cwd, signal: exec.signal })
   for (const path of paths) {
     exec.signal.throwIfAborted()
+    if (nodesRemaining <= 0) {
+      result.skipped.push({ path, reason: 'AST scan budget exhausted' })
+      continue
+    }
     const target = await fs.resolve(path, { cwd, signal: exec.signal })
     if (!fs.contains(root, target)) throw new Error(`path is outside the Session workspace: ${path}`)
     const info = await fs.stat(target, exec.signal)
@@ -121,13 +141,35 @@ export async function findDeclarations(
       continue
     }
     result.filesScanned++
-    const declarations = extractDeclarations(path, source, names, MAX_RESULTS + 1 - result.declarations.length)
-    result.declarations.push(...declarations)
-    if (result.declarations.length > MAX_RESULTS) {
-      result.declarations.length = MAX_RESULTS
-      result.truncated = true
-      break
-    }
+    // Keep at most 30 candidates per name across all files, never all matching AST nodes.
+    const slots = new Map([...retained].map(([name, items]) => [name, MAX_RESULTS - items.length]))
+    const scan = scanDeclarations(path, source, slots, nodesRemaining)
+    nodesRemaining -= scan.nodesVisited
+    for (const item of scan.declarations) retained.get(item.name)!.push(item)
+    for (const name of scan.omittedNames) omitted.add(name)
+    if (scan.syntaxError) scanReasons.push(`syntax recovery in ${path}`)
+    for (const reason of scan.incompleteReasons) scanReasons.push(`${reason} in ${path}`)
   }
+  // Round-robin gives every name with observed candidates a slot before any gets a second.
+  for (let round = 0; result.declarations.length < MAX_RESULTS; round++) {
+    let added = false
+    for (const items of retained.values()) {
+      if (round < items.length && result.declarations.length < MAX_RESULTS) {
+        result.declarations.push(items[round])
+        added = true
+      }
+    }
+    if (!added) break
+  }
+  const commonReasons = [...scanReasons]
+  if (result.skipped.length) commonReasons.push('candidate files skipped; see skipped')
+  result.nameResults = [...retained].map(([name, items]) => {
+    const shown = result.declarations.filter(item => item.name === name).length
+    const incompleteReasons = [...commonReasons]
+    if (omitted.has(name) || shown < items.length) incompleteReasons.push('30-result budget; additional candidates omitted')
+    return { name, shown, completeness: result.filesScanned === 0 ? 'unscanned'
+      : incompleteReasons.length ? 'partial' : 'complete', incompleteReasons }
+  })
+  result.truncated = result.nameResults.some(item => item.completeness !== 'complete')
   return result
 }
