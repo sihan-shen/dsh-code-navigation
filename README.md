@@ -40,7 +40,7 @@ Code navigation and retrieval toolkit for DeepSeek Harness.
 - 绑定、引用和定义跳转交给宿主 LSP；
 - 最终答案仍由 Agent 读取和判断源码。
 
-抽象依赖为 DeepSeek Harness 的 `tools`、`fs` 服务，以及可选的 `lsp`、`systemPrompt` 服务。依赖版本由 [package.json](package.json) 和 [pnpm-lock.yaml](pnpm-lock.yaml) 固定。
+抽象依赖为 DeepSeek Harness 的 `tools`、`fs` 服务，以及可选的 `lsp`、`systemPrompt` 服务。依赖版本由 [package.json](https://github.com/sihan-shen/dsh-code-navigation/blob/main/package.json) 和 [pnpm-lock.yaml](https://github.com/sihan-shen/dsh-code-navigation/blob/main/pnpm-lock.yaml) 固定。
 
 ## Install
 
@@ -52,7 +52,7 @@ pnpm typecheck
 pnpm build
 ```
 
-npm 包名为 `@han_05/dsh-code-navigation`。`peerDependencies` 兼容 DSH `0.2.0-rc.2`、`0.2.1-rc.2` 及 `0.2.x` stable；更新的 prerelease 需要重新验证。实际运行验证使用 DSH `0.2.1-rc.2`。可通过 DSH 插件管理器安装：
+npm 包名为 `@han_05/dsh-code-navigation`。`peerDependencies` 兼容 DSH `0.2.0-rc.2`、`0.2.1-rc.2` 及 `0.2.x` stable；更新的 prerelease 需要重新验证。当前构建/类型检查基线为 DSH `0.2.0-rc.2`、Cordis `4.0.4`、TypeScript `6.0.3`；最近一次完整运行验证使用 DSH `0.2.1-rc.4`、Cordis `4.0.5`、TypeScript `6.0.3`（2026-10-27）。可通过 DSH 插件管理器安装：
 
 ```sh
 dsh plugin --profile web add @han_05/dsh-code-navigation
@@ -108,15 +108,24 @@ await ctx.plugin(codeNavigation, {
 
 LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider；缺少服务时不会注册对应工具。系统提示通过宿主的可选 `systemPrompt` 服务注入。
 
+以上为直接 `ctx.plugin` 的默认值。通过 `dsh plugin add` 安装时，随包 `cordis.patch.yml` 会设置 `enableCodeContext: true`；需要纯声明工具时可在 profile 中覆盖。
+
 ## Language Scope
 
-解析与检索路径覆盖 `.ts`、`.tsx`、`.js`、`.jsx`；批量 LSP 和引用查询只接受 `.ts` 使用点。其他语言不在当前范围内，不要把 TypeScript/JavaScript 的结果外推为其他语言支持。
+| 能力 | 扩展名 | 说明 |
+| --- | --- | --- |
+| AST 声明定位（`nav_find_declarations`） | `.ts` `.tsx` `.js` `.jsx` | 单文件语法声明；不是完整类型检查 |
+| 词法检索（`nav_search_context` 无索引） | 上述四种 + `.mjs` `.cjs` `.mts` `.cts` | 宿主 grep + 有界源码/语法上下文 |
+| 固定文件语义索引 / hybrid 文档块 | `.ts` `.tsx` `.js` `.jsx` | `semanticIndex.files` 只接受这四种 |
+| LSP 引用 / 批量定义 | `.ts` | 只处理已知 `.ts` 声明/使用点 |
+
+其他语言不在当前范围内，不要把 TypeScript/JavaScript 的结果外推为其他语言支持。
 
 ## Tools
 
 | 工具 | 用途 | 主要输入 |
 | --- | --- | --- |
-| `nav_find_declarations` | 按精确名称查找 TS/JS 语法声明；返回种类、容器、名称坐标和首行预览。省略 `files` 时用宿主 grep 自动发现最多 20 个候选文件 | `names`（1–8），可选 `files`（1–20） |
+| `nav_find_declarations` | 按精确名称查找 TS/JS 语法声明；返回种类、容器、名称坐标、首行预览及逐名/根扫描完整性。省略 `files` 时用宿主 grep 自动发现最多 20 个候选文件 | `names`（1–8），可选 `files`（1–20） |
 | `nav_search_context` | 词法 RAG：字面匹配 + AST 声明上下文/有界源码；配置索引且传 `query` 时支持词法+向量候选并集 | `terms`（1–6）和/或 `query`，可选 `mode`、`path`、`limit` |
 | `nav_search_semantic_context` | 纯语义 RAG：在已准备的固定文件快照中按 query 向量召回源码块；可选一跳引用扩展 | `query`，可选 `path`、`limit`（1–6）、`expand_relations` |
 | `nav_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用，附有界源码 | `file_path`、`name` |
@@ -130,6 +139,10 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider；缺少服
 - `hybrid`：显式并集词法候选与向量候选，需要 `query` 和 `semanticIndex`。
 
 无 `semanticIndex` 时，schema 不暴露 `query`/`mode`。
+
+### Declaration Completeness
+
+`nav_find_declarations` 的返回包含逐名 `nameResults`（`observed`、`shown`、`completeness`、`incompleteReasons`）和根 `scanComplete`。`scanComplete=true` 表示本次候选文件范围内支持语法的扫描没有跳过、恢复解析或节点预算缺口；此时 `observed` 是这些候选文件内的精确总数，即使展示仍因 30 条上限而为 `partial`。`scanComplete=false` 时 `observed` 只是已访问 AST 匹配数，不能当作全仓缺失、真实声明数下界或唯一性证明。展示上限、跳过文件、语法恢复和节点深度缺口都会使逐名完整性降级；`truncated` 总括任一逐名不完整状态。
 
 ## RAG Modes and Principles
 
@@ -205,7 +218,7 @@ await prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })
 
 查询侧只读取已准备关系，不调用 LSP；`expand_relations: false` 可关闭扩展。关系是一跳语法/引用线索，不证明运行时调用。
 
-准备结果保存在工作区 `.code-navigation/`；不同工作区/worktree 的索引不能直接复用。完整类型见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
+准备结果保存在工作区 `.code-navigation/`；不同工作区/worktree 的索引不能直接复用。完整类型见 [语义索引接口](https://github.com/sihan-shen/dsh-code-navigation/blob/main/src/semantic/types.ts) 和 [概览接口](https://github.com/sihan-shen/dsh-code-navigation/blob/main/src/semantic/overview-types.ts)。
 
 ## Batch LSP Navigation
 
@@ -226,21 +239,21 @@ await prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })
 - 主入口 `@han_05/dsh-code-navigation`：导出 `name`、`inject`、`apply`，由 Harness 装载。
 - 子入口 `@han_05/dsh-code-navigation/semantic-index`：导出 `prepareSemanticIndex`、`prepareSemanticOverviews`、`prepareSemanticRelations`，以及 `LocalEmbedding`、`SemanticIndexConfig`、`SemanticRelationsConfig`、`OverviewGenerator` 等类型。
 
-工具是模型可见 API，参数、输出和渲染实现位于 [src/tools/](src/tools/)；检索与语义准备实现位于 [src/search/](src/search/) 和 [src/semantic/](src/semantic/)。完整类型定义见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
+工具是模型可见 API，参数、输出和渲染实现位于 [src/tools/](https://github.com/sihan-shen/dsh-code-navigation/tree/main/src/tools)；检索与语义准备实现位于 [src/search/](https://github.com/sihan-shen/dsh-code-navigation/tree/main/src/search) 和 [src/semantic/](https://github.com/sihan-shen/dsh-code-navigation/tree/main/src/semantic)。完整类型定义见 [语义索引接口](https://github.com/sihan-shen/dsh-code-navigation/blob/main/src/semantic/types.ts) 和 [概览接口](https://github.com/sihan-shen/dsh-code-navigation/blob/main/src/semantic/overview-types.ts)。
 
 ## Contributing
 
-当前为私有本地包，不接受外部 Pull Request。问题、缺陷和改动请求请通过仓库所有者或内部协作渠道提出；提交前请运行：
+本项目以 `@han_05/dsh-code-navigation` 公开发布到 npm；本仓库暂不接受外部 Pull Request，问题、缺陷和改动请求请通过仓库所有者或内部协作渠道提出。提交前请运行：
 
 ```sh
 pnpm typecheck
 pnpm build
 ```
 
-项目工作约定见 [AGENTS.md](AGENTS.md)。CI 检查与本地等价命令见 [.github/CI.md](.github/CI.md)。修改检索协议、工具 schema 或语义索引格式时，应同步更新本 README 和相关设计文档。
+项目工作约定见 [AGENTS.md](https://github.com/sihan-shen/dsh-code-navigation/blob/main/AGENTS.md)。CI 检查与本地等价命令见 [.github/CI.md](https://github.com/sihan-shen/dsh-code-navigation/blob/main/.github/CI.md)。修改检索协议、工具 schema 或语义索引格式时，应同步更新本 README 和相关设计文档。
 
 ## License
 
-[MIT](LICENSE) © 2026 dsh-code-navigation contributors。
+[MIT](https://github.com/sihan-shen/dsh-code-navigation/blob/main/LICENSE) © 2026 dsh-code-navigation contributors。
 
 本项目采用与常见 DeepSeek Harness 插件一致的 MIT 协议。
