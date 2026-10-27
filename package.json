@@ -1,9 +1,8 @@
 {
-  "name": "dsh-code-navigation",
+  "name": "@han_05/dsh-code-navigation",
   "version": "0.1.0",
   "description": "Code navigation and retrieval toolkit for DeepSeek Harness.",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "exports": {
     ".": {
@@ -26,6 +25,9 @@
     "build": "tsc",
     "prepare": "pnpm build",
     "prepack": "pnpm build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "typescript": "6.0.3"

@@ -8,11 +8,11 @@
 2. `pnpm typecheck`
 3. `pnpm build`
 4. `package.json` / `dsh.bundle` 元数据：
-   - 包名 `dsh-code-navigation`；
+   - 包名 `@han_05/dsh-code-navigation`；
    - description 非空且少于 120 字符；
    - MIT license；
    - repository 指向本仓库；
-   - `dsh.bundle.patch` 存在，且 patch 安装 `dsh-code-navigation`；
+   - `dsh.bundle.patch` 存在，且 patch 安装 `@han_05/dsh-code-navigation`；
    - DSH peer 范围显式包含 `0.2.0-rc.2` 与 `0.2.1-rc.2` 预发布分支；
    - `dist/index.js` 已生成。
 5. `npm pack --dry-run`：确认发布包包含 `dist/index.js`、`cordis.patch.yml`、`README.md`、`LICENSE`。

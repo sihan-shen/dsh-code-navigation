@@ -1,5 +1,5 @@
 - insert:
     - id: dsh-code-navigation
-      name: dsh-code-navigation
+      name: '@han_05/dsh-code-navigation'
       config:
         enableCodeContext: true

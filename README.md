@@ -1,4 +1,4 @@
-# dsh-code-navigation
+# dsh-code-navigation _(@han_05/dsh-code-navigation)_
 
 [![CI](https://github.com/sihan-shen/dsh-code-navigation/actions/workflows/ci.yml/badge.svg)](https://github.com/sihan-shen/dsh-code-navigation/actions/workflows/ci.yml)
 
@@ -52,7 +52,13 @@ pnpm typecheck
 pnpm build
 ```
 
-当前为私有本地包，未发布到公共 registry。`peerDependencies` 兼容 DSH `0.2.0-rc.2`、`0.2.1-rc.2` 及 `0.2.x` stable；更新的 prerelease 需要重新验证。实际运行验证使用 DSH `0.2.1-rc.2`。安装完成后，在宿主 Cordis Context 上加载构建入口，替换为实际绝对路径：
+npm 包名为 `@han_05/dsh-code-navigation`。`peerDependencies` 兼容 DSH `0.2.0-rc.2`、`0.2.1-rc.2` 及 `0.2.x` stable；更新的 prerelease 需要重新验证。实际运行验证使用 DSH `0.2.1-rc.2`。可通过 DSH 插件管理器安装：
+
+```sh
+dsh plugin --profile web add @han_05/dsh-code-navigation
+```
+
+本地开发完成后，在宿主 Cordis Context 上加载构建入口，替换为实际绝对路径：
 
 ```ts
 import * as codeNavigation from '/absolute/path/to/dsh-code-navigation/dist/index.js'
@@ -154,7 +160,7 @@ Hybrid 的边界：
 import {
   prepareSemanticIndex,
   type SemanticIndexConfig,
-} from 'dsh-code-navigation/semantic-index'
+} from '@han_05/dsh-code-navigation/semantic-index'
 
 const semanticIndex: SemanticIndexConfig = {
   files: ['src/service.ts'], // 1–32 个明确的 TS/JS 文件
@@ -217,8 +223,8 @@ await prepareSemanticRelations(ctx.fs, ctx.lsp, semanticIndex, { cwd })
 
 公开入口：
 
-- 主入口 `dsh-code-navigation`：导出 `name`、`inject`、`apply`，由 Harness 装载。
-- 子入口 `dsh-code-navigation/semantic-index`：导出 `prepareSemanticIndex`、`prepareSemanticOverviews`、`prepareSemanticRelations`，以及 `LocalEmbedding`、`SemanticIndexConfig`、`SemanticRelationsConfig`、`OverviewGenerator` 等类型。
+- 主入口 `@han_05/dsh-code-navigation`：导出 `name`、`inject`、`apply`，由 Harness 装载。
+- 子入口 `@han_05/dsh-code-navigation/semantic-index`：导出 `prepareSemanticIndex`、`prepareSemanticOverviews`、`prepareSemanticRelations`，以及 `LocalEmbedding`、`SemanticIndexConfig`、`SemanticRelationsConfig`、`OverviewGenerator` 等类型。
 
 工具是模型可见 API，参数、输出和渲染实现位于 [src/tools/](src/tools/)；检索与语义准备实现位于 [src/search/](src/search/) 和 [src/semantic/](src/semantic/)。完整类型定义见 [语义索引接口](src/semantic/types.ts) 和 [概览接口](src/semantic/overview-types.ts)。
 
