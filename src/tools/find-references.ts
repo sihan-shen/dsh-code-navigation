@@ -57,9 +57,10 @@ function renderReferences(value: ReferenceResult): string {
 }
 
 export function registerFindReferencesTool(ctx: Context): void {
-  ctx.tools.register(defineTool({
+  const baseDescription = 'Replace searching and ordinary read of candidate usage files when semantic references are needed and a declaration name plus its workspace-relative .ts file are known. Returned exact ranges and bounded source replace those reads when sufficient; do not add a reference query just to confirm uses already proved. Call directly with file_path and name; no manual cursor or preliminary reference grep is needed.'
+  const tool = defineTool({
     name: 'nav_find_references',
-    description: 'Replace searching and ordinary read of candidate usage files when semantic references are needed and a declaration name plus its workspace-relative .ts file are known. Returned exact ranges and bounded source replace those reads when sufficient; do not add a reference query just to confirm uses already proved. Call directly with file_path and name; no manual cursor or preliminary reference grep is needed. Unknown declaration path: first use nav_find_declarations. A unique declaration triggers one host LSP query; multiple declarations return candidates without a query, so select a candidate and use native lsp. Results include the declaration, exact ranges, counts and bounded source. Check omissions/context limits; read only missing behavior or enclosing code. Source snippets do not establish call hierarchy. For use-site cursors or other file types use native lsp.',
+    description: baseDescription,
     parameters: {
       file_path: { type: 'string', required: true, description: 'Known workspace-relative .ts file containing the declaration; use the selected declaration result path.' },
       name: { type: 'string', required: true, description: 'Exact declared identifier in that file, not an import alias or regex; this tool does not search for files.' },
@@ -113,5 +114,22 @@ export function registerFindReferencesTool(ctx: Context): void {
     timeoutMs: 60000,
     isConcurrencySafe: () => true,
     execute: (args, exec) => findDeclarationReferences(ctx.fs, ctx.lsp, args, exec),
-  }))
+  })
+  Object.defineProperty(tool, 'description', {
+    enumerable: true,
+    configurable: true,
+    get: () => {
+      const hasAst = ctx.tools.get('nav_find_declarations') !== undefined
+      const hasLsp = ctx.tools.get('lsp') !== undefined
+      const parts = [baseDescription]
+      if (hasAst) parts.push('Unknown declaration path: first use nav_find_declarations.')
+      parts.push(hasLsp
+        ? 'A unique declaration triggers one host LSP query; multiple declarations return candidates without a query, so select a candidate and use native lsp.'
+        : 'A unique declaration triggers one host LSP query; multiple declarations return candidates without a query.')
+      parts.push('Results include the declaration, exact ranges, counts and bounded source. Check omissions/context limits; read only missing behavior or enclosing code. Source snippets do not establish call hierarchy.')
+      if (hasLsp) parts.push('For use-site cursors or other file types use native lsp.')
+      return parts.join(' ')
+    },
+  })
+  ctx.tools.register(tool)
 }

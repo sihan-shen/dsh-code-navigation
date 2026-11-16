@@ -111,20 +111,33 @@ const semanticCaches = new WeakMap<object, SemanticQueryCache>()
 export function registerSearchContextTool(ctx: Context, input?: SemanticIndexConfig): void {
   const semantic = input ? resolveConfig(input) : undefined
   const hybrid = semantic !== undefined
-  const basePrompt = 'When TS/JS search needs surrounding implementation source, use nav_search_context instead of separate grep plus ordinary read of matching files. Supply literal terms when known. The tool keeps lexical declarations/anchors first. Reuse numbered fragments and anchors; read only missing branches or dependencies. The first vector card is the primary evidence card; later cards are supporting pointers. Use the primary card first, and open a supporting card only for a specific missing fact. Check term coverage for terms without selected fragments before refining. Use available declaration or native LSP tools only for unresolved identity, type or relationship questions. An unchanged empty query adds no evidence; refine it or stop when the required facts are covered.'
-  const hybridPrompt = ' When a prepared semanticIndex is configured, also pass a natural-language query with mode hybrid for concept recall; vector-seeded source is re-read from the current workspace and is not semantic proof.'
-  const baseDescription = 'Replace separate grep plus ordinary read of matching TS/JS files when literal terms and bounded surrounding implementation can answer the question. Use 1–6 case-sensitive literal terms. Oversized declarations return a bounded declaration-partial view: declaration head, hit neighborhood and omitted range. Syntax errors and unsupported bindings fall back to lexical windows or are omitted. Each fragment carries up to three 1-based UTF-16 anchors; term coverage reports matched/selected/omitted status. Reuse source already shown; read only missing ranges or dependencies. If declaration identity or coordinates are needed, pass confirmed fragment paths as files to nav_find_declarations when available. For unresolved cross-file targets, references or types, use native lsp at exact surviving symbol coordinates. Partial coverage and lexical matches do not prove semantic completeness.'
-  const hybridDescription = ' Use mode=hybrid to union lexical candidates with vector-seeded files; lexical declarations and anchors stay first, and vector-seeded source is re-read from the current workspace, not treated as semantic proof. The first navigation card carries the primary body; supporting cards only point to ranges. Read only the body ranges or gaps the question still needs. mode=auto uses vector only when lexical coverage is weak; mode=lexical never calls the semantic index.'
+  const baseDescription = 'Replace separate grep plus ordinary read of matching TS/JS files when 1–6 case-sensitive literal terms and bounded surrounding implementation source are needed. Oversized declarations return a bounded declaration-partial view: declaration head, hit neighborhood and omitted range. Syntax errors and unsupported bindings fall back to lexical windows or are omitted. Each fragment carries up to three 1-based UTF-16 anchors; term coverage reports matched/selected/omitted status. Reuse source already shown; read only missing ranges or dependencies.'
+  const hybridDescription = 'Use mode=hybrid to union lexical candidates with vector-seeded files; lexical declarations and anchors stay first, and vector-seeded source is re-read from the current workspace, not treated as semantic proof. The first navigation card carries the primary body; supporting cards only point to ranges. Read only the body ranges or gaps the question still needs. mode=auto uses vector only when lexical coverage is weak; mode=lexical never calls the semantic index.'
   ctx.inject(['systemPrompt'], scoped => {
     scoped.systemPrompt.section({
       name: 'tool:nav_search_context', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 1,
-      text: ({ scope }) => scoped.tools.get('nav_search_context', scope) === undefined ? ''
-        : basePrompt + (hybrid ? hybridPrompt : ''),
+      text: ({ scope }) => {
+        if (scoped.tools.get('nav_search_context', scope) === undefined) return ''
+        const has = (name: string) => scoped.tools.get(name, scope) !== undefined
+        const hasAst = has('nav_find_declarations'), hasBash = has('bash')
+        const hasLsp = has('lsp') || has('nav_batch_definitions') || has('nav_find_references')
+        const parts = [
+          `When TS/JS search needs surrounding implementation source, use nav_search_context with 1–6 literal terms instead of separate grep plus ordinary read${hasBash ? ' or shell grep/sed/cat' : ''} of matching files. The tool keeps lexical declarations and anchors first. Reuse numbered fragments and anchors; read only missing branches or dependencies. Check term coverage for terms without selected fragments before refining.`,
+        ]
+        if (hybrid) {
+          parts.push('When a prepared semanticIndex is configured, also pass a natural-language query with mode=hybrid (or mode=auto) for concept recall; vector-seeded source is re-read from the current workspace and is not semantic proof. The first vector card is the primary evidence card; later cards are supporting pointers. Use the primary card first, and open a supporting card only for a specific missing fact.')
+        }
+        if (hasAst && hasLsp) parts.push('Use available declaration or LSP tools only for unresolved identity, type or relationship questions.')
+        else if (hasAst) parts.push('Use nav_find_declarations only when exact declaration identity, kind, count or coordinates are still needed.')
+        else if (hasLsp) parts.push('Use available LSP tools only for unresolved symbol target, reference or type questions.')
+        parts.push(`An unchanged${hybrid ? ' or empty' : ''} query adds no evidence; refine it or stop when the required facts are covered.`)
+        return parts.join(' ')
+      },
     })
   })
-  ctx.tools.register(defineTool({
+  const tool = defineTool({
     name: 'nav_search_context',
-    description: baseDescription + (hybrid ? hybridDescription : ''),
+    description: baseDescription,
     parameters: {
       terms: { type: 'array', ...(hybrid ? {} : { required: true as const }), items: { type: 'string' }, description: '1–6 literal code terms, each 2–64 characters with a letter or number; not regexes, case-sensitive; e.g. ["createSession", "signal"].' + (hybrid ? ' Optional when query is present.' : '') },
       ...(hybrid ? {
@@ -179,5 +192,26 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
       }
       return searchCodeContext(ctx.fs, ctx.tools, args, exec, semantic, cache)
     },
-  }))
+  })
+  Object.defineProperty(tool, 'description', {
+    enumerable: true,
+    configurable: true,
+    get: () => {
+      const has = (name: string) => ctx.tools.get(name) !== undefined
+      const parts = [baseDescription]
+      if (has('nav_find_declarations')) {
+        parts.push('If declaration identity, count or coordinates are needed, pass confirmed fragment paths as files to nav_find_declarations.')
+      }
+      if (has('lsp')) {
+        parts.push('For unresolved cross-file targets, references or types, use native lsp at exact surviving symbol coordinates.')
+      } else {
+        const lspTools = [has('nav_batch_definitions') ? 'nav_batch_definitions' : '', has('nav_find_references') ? 'nav_find_references' : ''].filter(Boolean)
+        if (lspTools.length) parts.push(`For unresolved cross-file targets, references or types, use ${lspTools.join(' or ')}.`)
+      }
+      parts.push('Partial coverage and lexical matches do not prove semantic completeness.')
+      if (hybrid) parts.push(hybridDescription)
+      return parts.join(' ')
+    },
+  })
+  ctx.tools.register(tool)
 }

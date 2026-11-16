@@ -143,9 +143,10 @@ const itemSchema = {
 } as const
 
 export function registerBatchDefinitionsTool(ctx: Context): void {
-  ctx.tools.register(defineTool({
+  const baseDescription = "Replace target-file read ONLY when a requested static binding or supported short linked fact remains unresolved. If visible source already proves the requested identity, kind and location, answer directly; do not navigate just to confirm it. For a missing binding, submit an available .ts outer use with line+symbol; downstream names/files/anchors may remain unknown. Do not read targets to collect every role first; 1–8 is capacity. Unique callback new, returned this call, constructor assignment call or array-initializer call can continue up to two layers/four internal cursors. Set definition_only=true for immediate definitions; omit for linked facts. Reuse mappings and numbered source; grep/read only missing facts. Report requested facts and verified coordinates, without extra audit. Exact one-based UTF-16 character is an alternative to symbol; expected_symbol never shifts it. Sources must be workspace .ts files <=64 KiB, total read <=384 KiB; at most 3 targets/cursor, 96 unique rows/12000 UTF-8 bytes."
+  const tool = defineTool({
     name: 'nav_batch_definitions',
-    description: "Replace target-file read ONLY when a requested static binding or supported short linked fact remains unresolved. If visible source already proves the requested identity, kind and location, answer directly; do not navigate just to confirm it. For a missing binding, submit an available .ts outer use with line+symbol; downstream names/files/anchors may remain unknown. Do not read targets to collect every role first; 1–8 is capacity. Unique callback new, returned this call, constructor assignment call or array-initializer call can continue up to two layers/four internal cursors. Set definition_only=true for immediate definitions; omit for linked facts. Reuse mappings and numbered source; grep/read only missing facts. Report requested facts and verified coordinates, without extra audit. Exact one-based UTF-16 character is an alternative to symbol; expected_symbol never shifts it. Sources must be workspace .ts files <=64 KiB, total read <=384 KiB; at most 3 targets/cursor, 96 unique rows/12000 UTF-8 bytes. file_too_large is not fixed by path/cursor changes: reuse evidence or use native lsp if available/focused read for the remaining claim. Static definitions do not prove runtime dispatch.",
+    description: baseDescription,
     parameters: {
       queries: { type: 'array', required: true, description: '1–8 visible .ts outer uses for still-unresolved requested bindings; one root is valid. Downstream anchors need not be known. Session workspace paths may be relative or absolute; one-based UTF-16.', items: cursorSchema },
     },
@@ -160,7 +161,16 @@ export function registerBatchDefinitionsTool(ctx: Context): void {
     timeoutMs: 60000,
     isConcurrencySafe: () => true,
     execute: (args, exec) => findBatchDefinitions(ctx.fs, ctx.lsp, { queries: args.queries.map(({ definition_only, ...q }) => ({ ...q, follow: definition_only ? [] : undefined })) }, exec),
-  }))
+  })
+  Object.defineProperty(tool, 'description', {
+    enumerable: true,
+    configurable: true,
+    get: () => {
+      const hasLsp = ctx.tools.get('lsp') !== undefined
+      return `${baseDescription} file_too_large is not fixed by path/cursor changes: ${hasLsp ? 'reuse evidence or use native lsp/focused read for the remaining claim.' : 'reuse evidence or use focused read for the remaining claim.'} Static definitions do not prove runtime dispatch.`
+    },
+  })
+  ctx.tools.register(tool)
   ctx.inject(['systemPrompt'], scoped => {
     scoped.systemPrompt.section({
       name: 'tool:nav_preceding_lsp', order: scoped.systemPrompt.getSectionOrder('TOOL_LSP') + 1,
