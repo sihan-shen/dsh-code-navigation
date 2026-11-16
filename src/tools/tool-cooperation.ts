@@ -6,21 +6,21 @@ export function registerToolCooperationPrompt(ctx: Context): void {
   ctx.inject(['systemPrompt'], scoped => {
     scoped.systemPrompt.section({
       name: 'tool:code_intelligence_cooperation',
-      order: scoped.systemPrompt.getSectionOrder('TOOL_LSP') + 1,
+      order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') - 1,
       text: ({ scope }) => {
         const has = (name: string) => scoped.tools.get(name, scope) !== undefined
         const ast = has('nav_find_declarations'), rag = has('nav_search_context'), lsp = has('lsp'), batch = has('nav_batch_definitions')
         const semantic = has('nav_search_semantic_context'), refs = has('nav_find_references'), overview = has('nav_get_code_overview')
         if (!ast && !rag && !batch && !semantic && !refs && !overview) return ''
-        const parts = ['Choose tools by the missing evidence; a read-only investigation can need semantic navigation. Do not call every available tool just to complete a sequence.']
-        if (overview) parts.push('Use nav_get_code_overview when an operator-prepared subsystem responsibility map is needed before drilling into specific files.')
-        if (rag) parts.push('When literal search needs bounded implementation source, use nav_search_context instead of separate grep and ordinary read of matching files; use its numbered evidence directly.' + (semantic ? ' When a prepared semanticIndex is visible, nav_search_context also accepts a natural-language query with mode hybrid; lexical declarations and anchors stay primary, and vector-seeded source is not semantic proof.' : ''))
-        if (semantic) parts.push('For conceptual questions inside the prepared fixed file set, nav_search_semantic_context can retrieve source without guessing literal terms. Its vectors and AST containment are candidates and syntax metadata, not cross-file binding proof. Reuse displayed evidence and stop when sufficient; an absent or stale index needs operator preparation.')
-        if (ast) parts.push('When only known-name declaration identity, kind or coordinates are missing, use nav_find_declarations instead of opening candidate files with read; do not query already-read declarations for confirmation. Reuse confirmed paths as files, especially for common names. On candidate overflow, confirm paths from the returned clues or grep/glob, then retry once with unchanged names and explicit files only if identity or coordinates remain necessary; never repeat the unchanged unscoped query.')
-        if (refs) parts.push('Use nav_find_references when semantic references of a known-file unique .ts declaration are needed instead of grepping or reading candidate usage files.')
-        if (batch) parts.push('Use nav_batch_definitions for unresolved .ts static bindings or supported short linked facts per its guidance, sending available outer uses rather than pre-reading targets.')
-        if (lsp) parts.push('Use lsp when a remaining claim needs the actual cross-file symbol target, uses or type rather than a spelling match. findReferences uses the selected declaration path/line/character unchanged. goToDefinition/hover uses an exact surviving call/import/extends symbol position, not the start of a source fragment. Missing external implementations remain unknown.')
-        parts.push('Read only missing source ranges or uncovered behavior; a resolved target is not by itself a reason to read it. Each query should resolve a remaining claim; stop when the evidence is sufficient.')
+        const parts = ['Route TS/JS code navigation to dedicated tools by the needed evidence:']
+        if (overview) parts.push('Use nav_get_code_overview first when a subsystem responsibility map is needed.')
+        if (rag) parts.push('For 1–6 literal terms or identifiers needing surrounding implementation source (including multi-term A|B|C lookups within a directory or file), prefer nav_search_context over separate grep plus read.' + (semantic ? ' With semanticIndex, pass query and mode=hybrid for concept recall.' : ''))
+        if (semantic) parts.push('For concept search inside the prepared file set without literal terms, use nav_search_semantic_context.')
+        if (ast) parts.push('To locate named TS/JS declarations, signatures, containers or coordinates, prefer nav_find_declarations (with files when paths are known) over grepping or reading candidate files.')
+        if (refs) parts.push('For semantic references of a known-file unique .ts declaration, use nav_find_references.')
+        if (batch) parts.push('For unresolved .ts static bindings or short call chains at seen call sites, use nav_batch_definitions.')
+        if (lsp) parts.push('For unresolved cross-file symbol targets, references or types, use native lsp at exact symbol coordinates.')
+        parts.push('Use grep for regex-only patterns or non-TS/JS files, and use read only for unshown line ranges.')
         return parts.join(' ')
       },
     })

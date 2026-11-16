@@ -111,9 +111,25 @@ const semanticCaches = new WeakMap<object, SemanticQueryCache>()
 export function registerSearchContextTool(ctx: Context, input?: SemanticIndexConfig): void {
   const semantic = input ? resolveConfig(input) : undefined
   const hybrid = semantic !== undefined
-  const baseDescription = 'Replace separate grep plus ordinary read of matching TS/JS files when 1–6 case-sensitive literal terms and bounded surrounding implementation source are needed. Oversized declarations return a bounded declaration-partial view: declaration head, hit neighborhood and omitted range. Syntax errors and unsupported bindings fall back to lexical windows or are omitted. Each fragment carries up to three 1-based UTF-16 anchors; term coverage reports matched/selected/omitted status. Reuse source already shown; read only missing ranges or dependencies.'
+  const baseDescription = 'Search TS/JS files for 1–6 case-sensitive literal terms and return bounded enclosing declarations or implementation windows in one step, replacing separate grep (such as multi-identifier A|B|C lookups) plus follow-up read calls. Oversized declarations return a declaration-partial view (header, hit neighborhood and omitted line range) with up to three 1-based UTF-16 anchors per fragment and per-term coverage. Reuse shown source; use read only for unshown line ranges or single-line raw data tables.'
   const hybridDescription = 'Use mode=hybrid to union lexical candidates with vector-seeded files; lexical declarations and anchors stay first, and vector-seeded source is re-read from the current workspace, not treated as semantic proof. The first navigation card carries the primary body; supporting cards only point to ranges. Read only the body ranges or gaps the question still needs. mode=auto uses vector only when lexical coverage is weak; mode=lexical never calls the semantic index.'
   ctx.inject(['systemPrompt'], scoped => {
+    scoped.on('system-prompt/assemble', async (_assembly, context, next) => {
+      const result = await next()
+      if (scoped.tools.get('nav_search_context', context.scope) === undefined) return result
+      return {
+        ...result,
+        sections: result.sections.map(section => section.name === 'tool:grep'
+          ? {
+              ...section,
+              text: section.text.replace(
+                ' Use read on a matched file when you need surrounding context.',
+                ' For 1–6 literal terms or identifiers in TS/JS files (including multi-term A|B|C lookups) when surrounding implementation source is needed, prefer nav_search_context over separate grep plus read; reserve grep for regex-only patterns or non-TS/JS files.',
+              ),
+            }
+          : section),
+      }
+    })
     scoped.systemPrompt.section({
       name: 'tool:nav_search_context', order: scoped.systemPrompt.getSectionOrder('TOOL_GREP') + 1,
       text: ({ scope }) => {
@@ -122,7 +138,7 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
         const hasAst = has('nav_find_declarations'), hasBash = has('bash')
         const hasLsp = has('lsp') || has('nav_batch_definitions') || has('nav_find_references')
         const parts = [
-          `When TS/JS search needs surrounding implementation source, use nav_search_context with 1–6 literal terms instead of separate grep plus ordinary read${hasBash ? ' or shell grep/sed/cat' : ''} of matching files. The tool keeps lexical declarations and anchors first. Reuse numbered fragments and anchors; read only missing branches or dependencies. Check term coverage for terms without selected fragments before refining.`,
+          `When TS/JS search needs surrounding implementation source, call nav_search_context with 1–6 literal terms (pass terms: ["A", "B", "C"] instead of grep "A|B|C" followed by read${hasBash ? ' or shell grep/sed/cat' : ''}). Pass path to scope to a directory or single file. Reuse returned numbered fragments and 1-based UTF-16 anchors; call read only for unshown line ranges or single-line raw data tables.`,
         ]
         if (hybrid) {
           parts.push('When a prepared semanticIndex is configured, also pass a natural-language query with mode=hybrid (or mode=auto) for concept recall; vector-seeded source is re-read from the current workspace and is not semantic proof. The first vector card is the primary evidence card; later cards are supporting pointers. Use the primary card first, and open a supporting card only for a specific missing fact.')
@@ -139,7 +155,7 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
     name: 'nav_search_context',
     description: baseDescription,
     parameters: {
-      terms: { type: 'array', ...(hybrid ? {} : { required: true as const }), items: { type: 'string' }, description: '1–6 literal code terms, each 2–64 characters with a letter or number; not regexes, case-sensitive; e.g. ["createSession", "signal"].' + (hybrid ? ' Optional when query is present.' : '') },
+      terms: { type: 'array', ...(hybrid ? {} : { required: true as const }), items: { type: 'string' }, description: '1–6 literal code terms or identifiers (2–64 chars each, case-sensitive, not regexes). To search multiple identifiers or case variants at once (instead of grep "A|B|C"), pass them as separate array items, e.g. ["deleteLeft", "DeleteOperations", "getDeleteRange"].' + (hybrid ? ' Optional when query is present.' : '') },
       ...(hybrid ? {
         query: { type: 'string', description: 'Optional natural-language concept/behavior, 1–1000 characters. Requires semanticIndex; use mode hybrid to force vector candidates, auto to use them only when lexical coverage is weak.' },
         mode: { type: 'string', enum: ['auto', 'lexical', 'hybrid'] as const, description: 'auto (default), lexical, or hybrid; hybrid requires query and semanticIndex.' },

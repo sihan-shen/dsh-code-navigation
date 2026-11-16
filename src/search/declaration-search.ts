@@ -3,7 +3,7 @@ import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 import { scanDeclarations, isDeclarationName } from '../ast/typescript-declarations.js'
 import type { Declaration } from '../ast/typescript-declarations.js'
 import { literalPattern } from './literal-pattern.js'
-import { isWorkspaceRelativePath } from '../workspace-path.js'
+import { isWorkspaceRelativePath, normalizeWorkspacePath } from '../workspace-path.js'
 
 const MAX_FILES = 20
 const MAX_NAMES = 8
@@ -37,14 +37,16 @@ function validateNames(names: string[]): ReadonlySet<string> {
   return unique
 }
 
-function validateFiles(files: string[]): string[] {
+function validateFiles(files: string[], cwd: string): string[] {
   if (files.length < 1 || files.length > MAX_FILES) throw new Error(`files must contain 1–${MAX_FILES} paths`)
+  const rootPrefix = cwd.replace(/[\\/]+$/, '')
   const unique = new Set<string>()
-  for (const path of files) {
-    if (!isWorkspaceRelativePath(path, SUPPORTED_FILE)) {
-      throw new Error(`unsupported workspace-relative TS/JS path: ${path}`)
+  for (const raw of files) {
+    const stripped = rootPrefix && raw.startsWith(rootPrefix + '/') ? raw.slice(rootPrefix.length + 1) : raw
+    if (!isWorkspaceRelativePath(stripped, SUPPORTED_FILE)) {
+      throw new Error(`unsupported workspace-relative TS/JS path: ${raw}`)
     }
-    unique.add(path)
+    unique.add(normalizeWorkspacePath(stripped))
   }
   return [...unique]
 }
@@ -103,7 +105,7 @@ export async function findDeclarations(
     result.truncated = true
     return result
   }
-  const paths = validateFiles(candidates)
+  const paths = validateFiles(candidates, cwd)
   const root = await fs.resolve('.', { cwd, signal: exec.signal })
   for (const path of paths) {
     exec.signal.throwIfAborted()
