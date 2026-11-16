@@ -126,7 +126,7 @@ LSP 工具需要宿主提供 `lsp` 服务及匹配的语言 provider；缺少服
 | 工具 | 用途 | 主要输入 |
 | --- | --- | --- |
 | `nav_find_declarations` | 按精确名称查找 TS/JS 语法声明；返回种类、容器、名称坐标、首行预览及逐名/根扫描完整性。省略 `files` 时用宿主 grep 自动发现最多 20 个候选文件 | `names`（1–8），可选 `files`（1–20） |
-| `nav_search_context` | 词法 RAG：字面匹配 + AST 声明上下文/有界源码；配置索引且传 `query` 时支持词法+向量候选并集 | `terms`（1–6）和/或 `query`，可选 `mode`、`path`、`limit` |
+| `nav_search_context` | 词法 RAG：支持 1–12 个字面词、Unicode/Emoji 符号或纯 `A\|B\|C` 交替（默认大小写不敏感，可用 `caseSensitive: true` 开启精确大小写匹配），返回 AST 声明上下文/有界源码；配置索引且传 `query` 时支持词法+向量候选并集 | `terms`（1–12）和/或 `query`，可选 `caseSensitive`、`mode`、`path`、`limit` |
 | `nav_search_semantic_context` | 纯语义 RAG：在已准备的固定文件快照中按 query 向量召回源码块；可选一跳引用扩展 | `query`，可选 `path`、`limit`（1–6）、`expand_relations` |
 | `nav_find_references` | 查询已知 `.ts` 文件内唯一具名声明的 LSP 引用，附有界源码 | `file_path`、`name` |
 | `nav_batch_definitions` | 从已见 `.ts` 使用点批量导航到静态定义；支持 `line + symbol` 或 `line + character` | `queries`（1–8） |

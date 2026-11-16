@@ -7,6 +7,7 @@ import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import type { ToolExecution, ToolRuntime } from '@deepseek-ai/dsh-tools'
 
 const MAX_MATCHES = 2000
+const MAX_TERMS = 12
 const MAX_FILES = 12
 const MAX_FILE_BYTES = 1024 * 1024
 const MAX_READ_BYTES = 4 * MAX_FILE_BYTES
@@ -17,7 +18,7 @@ const encoder = new TextEncoder()
 const supported = /\.(?:ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i
 
 export type ContextMode = 'auto' | 'lexical' | 'hybrid'
-export interface ContextQuery { terms?: string[]; query?: string; mode?: ContextMode; path?: string; limit?: number }
+export interface ContextQuery { terms?: string[]; query?: string; mode?: ContextMode; path?: string; limit?: number; caseSensitive?: boolean }
 export type FragmentSource = 'lexical-window' | 'declaration-context' | 'declaration-partial'
 export interface SourceAnchor {
   kind: 'match' | 'declaration'
@@ -78,20 +79,53 @@ function workspacePath(path: string): string {
   return normalizeWorkspacePath(path)
 }
 
-function validateQuery(args: ContextQuery): { terms: string[]; query?: string; mode: ContextMode; path: string; limit: number } {
-  const terms = [...new Set((args.terms ?? []).map(term => term.trim()))]
+function hasTermText(haystack: string, term: string, caseSensitive: boolean): boolean {
+  return caseSensitive ? haystack.includes(term) : haystack.toLowerCase().includes(term.toLowerCase())
+}
+
+function findTermIndex(haystack: string, term: string, caseSensitive: boolean): number {
+  return caseSensitive ? haystack.indexOf(term) : haystack.toLowerCase().indexOf(term.toLowerCase())
+}
+
+function sameTerm(a: string, b: string, caseSensitive: boolean): boolean {
+  return caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase()
+}
+
+function validateQuery(args: ContextQuery): { terms: string[]; query?: string; mode: ContextMode; path: string; limit: number; caseSensitive: boolean } {
+  const caseSensitive = args.caseSensitive ?? false
+  const regexMeta = /[.*+?^${}()[\]\\]/
+  const termMessage = 'terms must contain 2–64 characters (or a non-ASCII symbol/emoji) including a letter, number, or non-ASCII symbol'
+  const expanded: string[] = []
+  for (const raw of args.terms ?? []) {
+    const trimmed = raw.trim()
+    if (trimmed.includes('|') && !regexMeta.test(trimmed)) {
+      const parts = trimmed.split('|').map(part => part.trim()).filter(Boolean)
+      if (parts.length === 0) throw new Error(termMessage)
+      expanded.push(...parts)
+    } else {
+      expanded.push(trimmed)
+    }
+  }
+  const terms: string[] = []
+  const seen = new Set<string>()
+  for (const term of expanded) {
+    const key = caseSensitive ? term : term.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    terms.push(term)
+  }
   const query = args.query?.trim()
   const mode = args.mode ?? 'auto'
-  if (terms.length === 0 && !query) throw new Error('provide 1–6 literal terms or a natural-language query')
-  if (args.terms !== undefined && args.terms.length > 6) throw new Error('terms must contain at most 6 literal search terms')
-  if (terms.some(term => term.length < 2 || term.length > 64 || /[\r\n\0]/.test(term)
-    || !/[\p{L}\p{N}]/u.test(term))) throw new Error('terms must contain 2–64 characters, including a letter or number')
+  if (terms.length === 0 && !query) throw new Error('provide 1–12 literal terms or a natural-language query')
+  if (terms.length > MAX_TERMS) throw new Error('terms must contain at most 12 literal search terms')
+  if (terms.some(term => term.length < 1 || term.length > 64 || (term.length < 2 && /^[\x00-\x7F]+$/.test(term))
+    || /[\r\n\0]/.test(term) || (!/[\p{L}\p{N}]/u.test(term) && !/[^\x00-\x7F\s]/u.test(term)))) throw new Error(termMessage)
   if (query !== undefined && (query.length < 1 || query.length > 1000 || /\0/.test(query))) throw new Error('query must contain 1–1000 characters')
   if (mode === 'lexical' && terms.length === 0) throw new Error('lexical mode requires at least one literal term')
   if (mode === 'hybrid' && !query) throw new Error('hybrid mode requires a natural-language query')
   const limit = args.limit ?? 4
   if (!Number.isInteger(limit) || limit < 1 || limit > 6) throw new Error('limit must be an integer from 1 to 6')
-  return { terms, query, mode, path: workspacePath(args.path ?? '.'), limit }
+  return { terms, query, mode, path: workspacePath(args.path ?? '.'), limit, caseSensitive }
 }
 
 interface VectorSeed { startLine: number; endLine: number; rank: number; score: number }
@@ -103,18 +137,19 @@ interface CandidateMatches { hits: { line: number; text: string }[]; terms: Set<
 interface Candidate { file: string; entry: CandidateMatches; target: Awaited<ReturnType<FileSystem['resolve']>> }
 
 /** A cheap pre-read signal, not a declaration proof. */
-function declarationLike(line: string, term: string): boolean {
+function declarationLike(line: string, term: string, caseSensitive: boolean): boolean {
   const escaped = escapeRegExp(term)
+  const flags = caseSensitive ? '' : 'i'
   return [
-    new RegExp(`\\b(?:function|class|interface|type|enum|namespace|const|let|var)\\s+${escaped}\\b`),
-    new RegExp(`\\b(?:get|set)\\s+${escaped}\\s*\\(`),
-    new RegExp(`\\b${escaped}\\s*[:=]\\s*(?:async\\s*)?(?:function\\b|\\()`),
-    new RegExp(`\\b${escaped}\\s*\\([^)]*\\)\\s*(?::[^={]+)?\\{`),
+    new RegExp(`\\b(?:function|class|interface|type|enum|namespace|const|let|var)\\s+${escaped}\\b`, flags),
+    new RegExp(`\\b(?:get|set)\\s+${escaped}\\s*\\(`, flags),
+    new RegExp(`\\b${escaped}\\s*[:=]\\s*(?:async\\s*)?(?:function\\b|\\()`, flags),
+    new RegExp(`\\b${escaped}\\s*\\([^)]*\\)\\s*(?::[^={]+)?\\{`, flags),
   ].some(pattern => pattern.test(line))
 }
 
 function sourceUnits(path: string, source: string, hits: SourceHit[], terms: string[],
-  limit: number, signal: AbortSignal, mark: (reason: string) => void): ContextUnit[] {
+  limit: number, signal: AbortSignal, mark: (reason: string) => void, caseSensitive: boolean): ContextUnit[] {
   const lines = source.split('\n'), declarations = contextDeclarations(path, source,
     reason => mark(`${path}: ${reason}`))
   const units = new Map<string, ContextUnit>()
@@ -134,8 +169,8 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
         .sort((a, b) => overlap(b) - overlap(a) || (a.end - a.start) - (b.end - b.start))
       : declarations.filter(range => range.matchStart <= hitIndex && range.end >= hitIndex)
         .sort((a, b) => (a.end - a.matchStart) - (b.end - b.matchStart))
-    const named = seed ? [] : enclosing.filter(range => range.matchStart === hitIndex && terms.includes(range.name)
-      && lines[hitIndex].includes(range.name))
+    const named = seed ? [] : enclosing.filter(range => range.matchStart === hitIndex
+      && terms.some(term => sameTerm(term, range.name, caseSensitive)) && lines[hitIndex].includes(range.name))
     // Line-only grep cannot disambiguate multiple declarations beginning on one line.
     const sameLine = seed ? [] : enclosing.filter(range => range.matchStart === hitIndex)
     // Prefer a declaration containing the whole seed; a tail-only overlap is not evidence.
@@ -159,7 +194,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
       : [{ line: hit.line, text: hit.text }]
     for (const item of anchorLines) {
       for (const term of terms) {
-        const at = item.text.indexOf(term)
+        const at = findTermIndex(item.text, term, caseSensitive)
         if (at < 0) continue
         const bom = item.line === 1 && lines[0].startsWith('\uFEFF') && !item.text.startsWith('\uFEFF') ? 1 : 0
         hitAnchors.push({ kind: 'match', name: term, line: item.line, character: at + 1 + bom })
@@ -196,7 +231,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
           .map(anchor => [`${anchor.kind}:${anchor.name}:${anchor.line}:${anchor.character}`, anchor])).values()]
           .slice(0, 3)
         pieces.push({ path, startLine, endLine, text: content, source: sourceKind,
-          matchedTerms: terms.filter(term => content.includes(term)),
+          matchedTerms: terms.filter(term => hasTermText(content, term, caseSensitive)),
           contextStartLine: contextFirst + 1, contextEndLine: contextLast + 1, anchors })
         cursor = next
       }
@@ -269,7 +304,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
     if (seed) key += `:seed:${seed.startLine}-${seed.endLine}:${seed.rank}`
     if (!fragments?.length) { mark('no usable source lines'); continue }
     const unit: ContextUnit = { fragments,
-      terms: terms.filter(term => fragments!.some(fragment => fragment.text.includes(term))),
+      terms: terms.filter(term => fragments!.some(fragment => hasTermText(fragment.text, term, caseSensitive))),
       name: declaration?.name ?? '', path, start: fragments[0].startLine - 1,
       origin: seed ? 'vector' : 'lexical', seedRank: seed?.rank }
     const existing = units.get(key)
@@ -292,7 +327,7 @@ function sourceUnits(path: string, source: string, hits: SourceHit[], terms: str
     }
     existing.fragments = [...byRange.values()].sort((a, b) => a.startLine - b.startLine)
     existing.terms = [...new Set([...existing.terms,
-      ...terms.filter(term => fragments!.some(fragment => fragment.text.includes(term)))])]
+      ...terms.filter(term => fragments!.some(fragment => hasTermText(fragment.text, term, caseSensitive)))])]
   }
   return [...units.values()]
 }
@@ -304,7 +339,7 @@ export async function searchCodeContext(
   const rawPath = args.path ?? '.'
   // Absolute paths are accepted only after provider containment checks below.
   const absolute = rawPath.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rawPath)
-  const { terms, query, mode, path: relativePath, limit } = validateQuery({ ...args, path: absolute ? '.' : rawPath })
+  const { terms, query, mode, path: relativePath, limit, caseSensitive } = validateQuery({ ...args, path: absolute ? '.' : rawPath })
   const cwd = exec.agent?.session.header.cwd
   if (!cwd) throw new Error('A Harness Session workspace is required')
   if (mode === 'hybrid' && !semantic) throw new Error('hybrid mode requires a configured semanticIndex')
@@ -322,7 +357,7 @@ export async function searchCodeContext(
   let matchLimitHit = false
   if (terms.length) {
     if (tools.get('grep', exec.agent) === undefined) throw new Error('host grep is unavailable')
-    const pattern = literalPattern(terms)
+    const pattern = literalPattern(terms, caseSensitive)
     const outcome = await tools.execute({ name: 'grep', arguments: {
       pattern, path, include: '*.{ts,tsx,js,jsx,mjs,cjs,mts,cts}' },
     callId: `${exec.callId}:grep` as typeof exec.callId, rootCallId: exec.rootCallId,
@@ -348,7 +383,7 @@ export async function searchCodeContext(
       let entry = files.get(file)
       if (!entry) { entry = { hits: [], terms: new Set(), seeds: [] }; files.set(file, entry) }
       entry.hits.push({ line: parsed.lineNumber, text: parsed.line })
-      for (const term of terms) if (parsed.line.includes(term)) entry.terms.add(term)
+      for (const term of terms) if (hasTermText(parsed.line, term, caseSensitive)) entry.terms.add(term)
     }
   }
   const result: ContextResult = { matchesFound: rawMatches.length, candidateFiles: files.size,
@@ -366,7 +401,7 @@ export async function searchCodeContext(
     for (const term of entry.terms) {
       const stat = termStats.get(term)!
       stat.matchedFiles++
-      stat.matchedLines += entry.hits.reduce((n, hit) => n + (hit.text.includes(term) ? 1 : 0), 0)
+      stat.matchedLines += entry.hits.reduce((n, hit) => n + (hasTermText(hit.text, term, caseSensitive) ? 1 : 0), 0)
     }
   }
   const weakLexical = files.size === 0 || terms.some(term => (termStats.get(term)?.matchedFiles ?? 0) === 0)
@@ -434,7 +469,8 @@ export async function searchCodeContext(
     let score = 0
     for (const term of candidate.entry.terms) {
       score += termWeight(term)
-      if (candidate.entry.hits.some(hit => hit.text.includes(term) && declarationLike(hit.text, term))) score += 1
+      if (candidate.entry.hits.some(hit => hasTermText(hit.text, term, caseSensitive)
+        && declarationLike(hit.text, term, caseSensitive))) score += 1
     }
     return score
   }
@@ -446,7 +482,7 @@ export async function searchCodeContext(
   const selected = new Set<Candidate>()
   const hasTerm = (candidate: Candidate, term: string) => candidate.entry.terms.has(term)
   const hasDeclarationHit = (candidate: Candidate, term: string) => candidate.entry.hits.some(hit =>
-    hit.text.includes(term) && declarationLike(hit.text, term))
+    hasTermText(hit.text, term, caseSensitive) && declarationLike(hit.text, term, caseSensitive))
   for (const term of [...terms].sort((a, b) => (termFrequency.get(a) ?? 0) - (termFrequency.get(b) ?? 0))) {
     const selectedHasTerm = [...selected].some(candidate => hasTerm(candidate, term))
     const selectedHasDeclaration = [...selected].some(candidate => hasTerm(candidate, term)
@@ -509,7 +545,7 @@ export async function searchCodeContext(
         current = current?.replace(/^\uFEFF/, '')
         searched = searched.replace(/^\uFEFF/, '')
       }
-      return current === searched && terms.some(term => hit.text.includes(term))
+      return current === searched && terms.some(term => hasTermText(hit.text, term, caseSensitive))
     })
     if (entry.hits.length && lexicalHits.length !== entry.hits.length) { skip('search lines changed or could not be verified') }
     const seedHits = entry.seeds.filter(seed => seed.startLine <= lines.length)
@@ -517,10 +553,10 @@ export async function searchCodeContext(
     if (seedHits.length !== entry.seeds.length) mark('vector seed line outside current source')
     const hits = [...lexicalHits, ...seedHits]
     if (!hits.length) { skip('no verified or seeded source line'); continue }
-    const nextUnits = sourceUnits(file, source, hits, terms, limit, exec.signal, mark)
+    const nextUnits = sourceUnits(file, source, hits, terms, limit, exec.signal, mark, caseSensitive)
     units.push(...nextUnits)
   }
-  const score = (unit: ContextUnit) => (terms.includes(unit.name) ? 1000 : 0)
+  const score = (unit: ContextUnit) => (terms.some(term => sameTerm(term, unit.name, caseSensitive)) ? 1000 : 0)
     + unit.terms.reduce((n, term) => n + termWeight(term), 0)
       * (unit.fragments[0].source === 'declaration-context' || unit.fragments[0].source === 'declaration-partial' ? 2 : 1)
 
@@ -547,7 +583,7 @@ export async function searchCodeContext(
     return pieces.map(([startLine, endLine]) => {
       const text = lines.slice(startLine - fragment.startLine, endLine - fragment.startLine + 1).join('\n')
       const piece: CodeFragment = { ...fragment, startLine, endLine, text,
-        matchedTerms: fragment.matchedTerms.filter(term => text.includes(term)),
+        matchedTerms: fragment.matchedTerms.filter(term => hasTermText(text, term, caseSensitive)),
         anchors: fragment.anchors.filter(anchor => anchor.line >= startLine && anchor.line <= endLine) }
       if (fragment.seedCoverage !== undefined && fragment.seedStartLine !== undefined && fragment.seedEndLine !== undefined) {
         piece.seedCoverage = startLine <= fragment.seedStartLine && endLine >= fragment.seedEndLine ? 'full' : 'partial'
@@ -560,7 +596,7 @@ export async function searchCodeContext(
   while (remaining.length) {
     exec.signal.throwIfAborted()
     // Lexical declaration anchors precede diversification; vector units fill remaining slots.
-    let index = remaining.findIndex(unit => unit.origin !== 'vector' && terms.includes(unit.name))
+    let index = remaining.findIndex(unit => unit.origin !== 'vector' && terms.some(term => sameTerm(term, unit.name, caseSensitive)))
     if (index < 0) index = remaining.findIndex(unit => unit.origin !== 'vector' && !represented.has(unit.path))
     if (index < 0) index = remaining.findIndex(unit => !represented.has(unit.path))
     if (index < 0) index = 0

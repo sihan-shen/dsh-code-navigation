@@ -3,6 +3,7 @@ export function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-export function literalPattern(terms: Iterable<string>): string {
-  return [...terms].map(escapeRegExp).join('|')
+export function literalPattern(terms: Iterable<string>, caseSensitive = true): string {
+  const body = [...terms].map(escapeRegExp).join('|')
+  return caseSensitive || !body ? body : `(?i)(?:${body})`
 }
