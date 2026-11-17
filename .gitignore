@@ -1,5 +1,7 @@
 # Design notes and imported history are local working material.
 /docs/
+# Local evaluation scripts, corpora, runtimes and records.
+/eval/
 /archive/
 /HANDOFF.md
 /upstream/
