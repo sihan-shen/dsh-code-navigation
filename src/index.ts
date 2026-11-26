@@ -14,7 +14,7 @@ export const inject = ['tools', 'fs']
 export function apply(ctx: Context, config: {
   /** 批量定义导航与前置指导；默认关闭，须宿主 LSP 服务。 */
   enablePrecedingLsp?: boolean
-  /** 默认注册声明AST；只需使用点导航的任务可关闭以减少可见协议。 */
+  /** 默认注册声明AST（开启 enableCodeContext 时默认收起，除非显式传 true）。 */
   enableFindDeclarations?: boolean
   enableDeclarationReferences?: boolean
   enableCodeContext?: boolean
@@ -22,7 +22,8 @@ export function apply(ctx: Context, config: {
   /** 显式准备的固定文件语义索引；未配置时不注册，不触发 embedding。 */
   semanticIndex?: SemanticIndexConfig
 } = {}): void {
-  if (config.enableFindDeclarations !== false) registerFindDeclarationsTool(ctx)
+  const registerFindDeclarations = config.enableFindDeclarations ?? !config.enableCodeContext
+  if (registerFindDeclarations) registerFindDeclarationsTool(ctx)
   if (config.enableToolCooperationPrompt === true) registerToolCooperationPrompt(ctx)
   if (config.enableCodeContext === true) registerSearchContextTool(ctx, config.semanticIndex)
   if (config.semanticIndex) registerSemanticContextTool(ctx, config.semanticIndex)

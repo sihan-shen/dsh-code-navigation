@@ -7,7 +7,64 @@ import type { ContextResult } from '../search/code-context-search.js'
 import { resolveConfig } from '../semantic/types.js'
 import type { SemanticIndexConfig } from '../semantic/types.js'
 
+function renderLocationsView(value: ContextResult): string {
+  const bytes = (text: string) => new TextEncoder().encode(text).byteLength
+  const renderLimit = 4 * 1024
+  const limitText = value.limits.join('; ')
+  const boundedLimits = bytes(limitText) > 900 ? `${limitText.slice(0, 450)} …` : limitText
+  const limitNote = value.truncated
+    ? ` Partial: ${boundedLimits}.`
+    : value.limits.length ? ` Notes: ${boundedLimits}.` : ''
+  const parts: string[] = [
+    `Locations: ${value.matchesFound} matched line(s) across ${value.candidateFiles} file(s); inspected ${value.filesRead} file(s).${limitNote}`,
+  ]
+  if (value.interpretations.length) {
+    parts.push(`Query interpretation: ${value.interpretations.join('; ')}`)
+  }
+  if (value.declarationCoords.length) {
+    parts.push('Declaration coordinates: ' + value.declarationCoords.map(d =>
+      `${d.name} -> ${d.path}:${d.line}:${d.character} (${d.kind}${d.container ? ` in ${d.container}` : ''})`).join('; '))
+  }
+  if (value.terms.length) {
+    parts.push('Terms: ' + value.terms.map(t => `${t.term} (${t.matchedLines} lines/${t.matchedFiles} files${t.omittedReason ? `; ${t.omittedReason}` : ''})`).join('; '))
+  }
+  let used = bytes(parts.join('\n')) + 256
+  let omittedFiles = 0
+  for (const loc of value.locations) {
+    const lines = [
+      `${loc.path} (${loc.totalMatches} match(es)):`,
+      ...loc.hits.map(hit => {
+        const decl = hit.declarationName
+          ? ` [${hit.declarationKind ? `${hit.declarationKind} ` : ''}${hit.declarationName}@${hit.declarationLine}:${hit.declarationCharacter}]`
+          : ''
+        return `  L${hit.line}:${hit.character}${decl}: ${hit.preview}`
+      }),
+    ].join('\n')
+    if (used + bytes(lines) + 1 > renderLimit) { omittedFiles++; continue }
+    parts.push(lines)
+    used += bytes(lines) + 1
+  }
+  for (const item of value.skipped) {
+    const text = `Skipped ${item.path}: ${item.reason}`
+    if (used + bytes(text) + 1 > renderLimit) break
+    parts.push(text)
+    used += bytes(text) + 1
+  }
+  if (value.extraMatchedFiles.length) {
+    const extra = 'More matched files (not AST-inspected): ' + value.extraMatchedFiles.map(f =>
+      `${f.path} (${f.matches}: L${f.lines.join(',')})`).join('; ')
+    if (used + bytes(extra) + 1 <= renderLimit) {
+      parts.push(extra)
+      used += bytes(extra) + 1
+    }
+  }
+  if (omittedFiles) parts.push(`Render omitted ${omittedFiles} matched file(s) due to compact 4 KiB locations cap.`)
+  parts.push('Next: call nav_search_context with view="fragments" and path="<file>" (or read with offset/limit) for full source.')
+  return parts.join('\n')
+}
+
 export function renderCodeContext(value: ContextResult, caseSensitive = false): string {
+  if (value.view === 'locations') return renderLocationsView(value)
   const bytes = (text: string) => new TextEncoder().encode(text).byteLength
   const renderLimit = 10 * 1024
   const limitText = value.limits.join('; ')
@@ -15,7 +72,13 @@ export function renderCodeContext(value: ContextResult, caseSensitive = false): 
   const vectorInfo = value.vectorStatus !== 'off'
     ? ` Vector ${value.vectorStatus}/${value.vectorTrigger}: ${value.vectorHits} hits, ${value.queryEmbeddings} query embedding(s); selected ${value.vectorSeededFragments} vector fragment(s), ${value.seedCoveredFragments} internally seed-covered (not visible-body coverage).`
     : ''
-  const intro = `${value.usedVector ? 'Lexical + vector candidates' : 'Lexical candidates only'}; ${value.matchesFound} matched lines in ${value.candidateFiles} files; read ${value.filesRead} files / ${value.bytesRead} bytes. Selected ${value.fragments.length} source fragments.${vectorInfo} Numbered body lines are visible source; pointer previews/anchors only locate source. Seed coverage describes selected ranges, not displayed text or answer completeness. Reuse shown source; read only a requested gap. Coordinates are 1-based UTF-16. ${value.truncated ? `Partial search coverage: ${boundedLimits}.` : 'All search candidates processed.'}`
+  const sourceNote = value.usedVector
+    ? 'Numbered body lines are visible source; pointer previews/anchors only locate source. Seed coverage describes selected ranges, not displayed text or answer completeness. Reuse shown source; read only a requested gap.'
+    : 'Numbered lines are verbatim current workspace source (1-based UTF-16). Do not re-read displayed line ranges; use read only for unshown offset/limit ranges or full un-truncated long lines.'
+  const coverageNote = value.truncated
+    ? `Partial search coverage: ${boundedLimits}.`
+    : value.limits.length ? `All search candidates processed. Notes: ${boundedLimits}.` : 'All search candidates processed.'
+  const intro = `${value.usedVector ? 'Lexical + vector candidates' : 'Lexical candidates'}; ${value.matchesFound} matched lines in ${value.candidateFiles} files; read ${value.filesRead} files / ${value.bytesRead} bytes. Selected ${value.fragments.length} fragment(s).${vectorInfo} ${sourceNote} ${coverageNote}`
   type VisibleFragment = { fragment: ContextResult['fragments'][number]; body: string; bodyLines: number }
   const visible: VisibleFragment[] = []
   const coverageText = (planned: boolean): string => value.terms.map(term => {
@@ -26,10 +89,18 @@ export function renderCodeContext(value: ContextResult, caseSensitive = false): 
       caseSensitive ? anchor.name === term.term : anchor.name.toLowerCase() === term.term.toLowerCase())).length
     return `${term.term}: matched ${term.matchedLines} lines/${term.matchedFiles} files; selected ${term.selectedFragments} fragments; visible body ${bodies} fragments/locator anchors ${anchors}${term.omittedReason ? `; ${term.omittedReason}` : ''}`
   }).join('; ')
-  // Reserve final coverage and summary before accepting atomic declaration groups.
+  const extraHeaders: string[] = []
+  if (value.interpretations.length) {
+    extraHeaders.push(`Query interpretation: ${value.interpretations.join('; ')}`)
+  }
+  if (value.declarationCoords.length) {
+    extraHeaders.push('Declaration coordinates: ' + value.declarationCoords.map(d =>
+      `${d.name} -> ${d.path}:${d.line}:${d.character} (${d.kind}${d.container ? ` in ${d.container}` : ''})`).join('; '))
+  }
+  const extraReserve = extraHeaders.reduce((n, line) => n + bytes(line) + 1, 0)
   const coverageReserve = value.terms.length ? bytes('Term coverage: ' + coverageText(true)) + 1 : 0
-  let used = bytes(intro) + coverageReserve + 512
-  const parts = [intro]
+  let used = bytes(intro) + extraReserve + coverageReserve + 512
+  const parts = [intro, ...extraHeaders]
   let omitted = 0, vectorCards = 0
   const groups = new Map<string, ContextResult['fragments']>()
   for (const fragment of value.fragments) {
@@ -78,7 +149,10 @@ export function renderCodeContext(value: ContextResult, caseSensitive = false): 
         return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${primary ? 'primary navigation' : 'supporting pointer'}${seed}; visible body ${bodyRange}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}${anchors}]${signatures.length ? `\n  declaration preview: ${signatures.join(' / ')}` : ''}${evidence}${missing}`
       }
       planned.push({ fragment, body: fragment.text, bodyLines: lines.length })
-      return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${fragment.source}; visible body ${fragment.startLine}-${fragment.endLine}${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]\n${numbered(lines, fragment.startLine)}`
+      const bodyBlock = fragment.isLongLineExcerpt
+        ? `${fragment.startLine} [long-line excerpt] | ${fragment.text}`
+        : numbered(lines, fragment.startLine)
+      return `\n${fragment.path}:${fragment.startLine}-${fragment.endLine} [${fragment.source}; visible body ${fragment.startLine}-${fragment.endLine}${seed}; associated context ${fragment.contextStartLine}-${fragment.contextEndLine}; terms: ${fragment.matchedTerms.join(', ')}${anchors}]\n${bodyBlock}`
     }).join('\n')
     const context = group[0], gaps: [number, number][] = []
     let cursor = context.contextStartLine
@@ -88,13 +162,17 @@ export function renderCodeContext(value: ContextResult, caseSensitive = false): 
     }
     if (cursor <= context.contextEndLine) gaps.push([cursor, context.contextEndLine])
     if (gaps.length) text += '\n  Unselected associated context in this group: ' + gaps.map(([start, end]) =>
-      `${start}-${end}; only if a requested fact needs it: read ${context.path} offset=${start} limit=${Math.min(40, end - start + 1)}`
+      `${start}-${end}; only if needed: read ${context.path} offset=${start} limit=${Math.min(80, end - start + 1)}`
     ).join('; ') + '.'
     if (used + bytes(text) + 1 > renderLimit) { omitted += group.length; continue }
-    // Only an accepted group consumes the primary card and visible coverage.
     vectorCards = plannedCards
     visible.push(...planned)
     parts.push(text); used += bytes(text) + 1
+  }
+  if (value.omittedRanges.length) {
+    const hints = value.omittedRanges.map(r => `${r.name} (${r.path}:${r.startLine}-${r.endLine}): read ${r.path} offset=${r.startLine} limit=${Math.min(120, r.endLine - r.startLine + 1)}`).join('; ')
+    const text = `Omitted matched context: ${hints}`
+    if (used + bytes(text) + 1 <= renderLimit) { parts.push(text); used += bytes(text) + 1 }
   }
   let skippedShown = 0
   for (const item of value.skipped) {
@@ -102,9 +180,13 @@ export function renderCodeContext(value: ContextResult, caseSensitive = false): 
     if (used + bytes(text) + 1 > renderLimit) break
     parts.push(text); used += bytes(text) + 1; skippedShown++
   }
-  if (value.terms.length) parts.splice(1, 0, 'Term coverage: ' + coverageText(false))
-  const bodyFragments = visible.filter(item => item.bodyLines > 0).length
-  parts.splice(value.terms.length ? 2 : 1, 0, `Visible: ${bodyFragments} body fragment(s), ${visible.length - bodyFragments} pointer-only fragment(s); render omitted ${omitted} selected fragment(s), ${value.skipped.length - skippedShown} skipped-file details. Unshown context may still contain requested facts.`)
+  const insertAt = 1 + extraHeaders.length
+  if (value.terms.length) parts.splice(insertAt, 0, 'Term coverage: ' + coverageText(false))
+  const pointerCount = visible.length - visible.filter(item => item.bodyLines > 0).length
+  const visibleSummary = value.usedVector
+    ? `Visible: ${visible.length - pointerCount} body fragment(s), ${pointerCount} pointer-only fragment(s); render omitted ${omitted} selected fragment(s), ${value.skipped.length - skippedShown} skipped-file details.`
+    : `Visible: ${visible.length} fragment(s)${omitted ? `; render omitted ${omitted} selected fragment(s)` : ''}${value.skipped.length - skippedShown ? `; ${value.skipped.length - skippedShown} skipped-file details omitted` : ''}.`
+  parts.splice(value.terms.length ? insertAt + 1 : insertAt, 0, visibleSummary)
   return parts.join('\n')
 }
 
@@ -114,7 +196,7 @@ const semanticCaches = new WeakMap<object, SemanticQueryCache>()
 export function registerSearchContextTool(ctx: Context, input?: SemanticIndexConfig): void {
   const semantic = input ? resolveConfig(input) : undefined
   const hybrid = semantic !== undefined
-  const baseDescription = 'Search TS/JS files for 1–12 literal terms, Unicode/emoji literals, or "A|B|C" alternations (case-insensitive by default; pass caseSensitive: true when exact casing is required) and return bounded enclosing declarations or implementation windows in one step, replacing separate grep plus follow-up read calls. Oversized declarations return a declaration-partial view (header, hit neighborhood and omitted line range) with up to three 1-based UTF-16 anchors per fragment and per-term coverage. Reuse shown source; use read only for unshown line ranges or single-line raw data tables.'
+  const baseDescription = 'Search TS/JS files using literal terms, "A|B|C" alternations, escaped literals ("hsl\\("), "A.*B" same-line co-occurrence, or ripgrep regexes (pattern). Case-insensitive by default. Use view="locations" for compact file-grouped lines and enclosing declaration names (~hundreds of bytes); default view="fragments" returns verbatim enclosing declarations/code bodies, declaration coordinates, and offset/limit hints for omitted ranges. Lines over 2 KiB (minified/raw data) return a bounded match excerpt. Reuse displayed source; read only unshown ranges.'
   const hybridDescription = 'Use mode=hybrid to union lexical candidates with vector-seeded files; lexical declarations and anchors stay first, and vector-seeded source is re-read from the current workspace, not treated as semantic proof. The first navigation card carries the primary body; supporting cards only point to ranges. Read only the body ranges or gaps the question still needs. mode=auto uses vector only when lexical coverage is weak; mode=lexical never calls the semantic index.'
   ctx.inject(['systemPrompt'], scoped => {
     scoped.on('system-prompt/assemble', async (_assembly, context, next) => {
@@ -127,7 +209,7 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
               ...section,
               text: section.text.replace(
                 ' Use read on a matched file when you need surrounding context.',
-                ' For 1–12 literal terms, identifiers, Unicode/emoji symbols, or plain "A|B|C" alternations in TS/JS files when surrounding implementation source is needed, prefer nav_search_context (case-insensitive by default) over separate grep plus read; reserve grep for regex-only patterns or non-TS/JS files.',
+                ' For TS/JS files (literals, "A|B|C", "A.*B", or regexes), prefer nav_search_context (view="locations" for quick discovery or view="fragments" for enclosing declarations/context); reserve grep for non-TS/JS files.',
               ),
             }
           : section),
@@ -141,13 +223,13 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
         const hasAst = has('nav_find_declarations'), hasBash = has('bash')
         const hasLsp = has('lsp') || has('nav_batch_definitions') || has('nav_find_references')
         const parts = [
-          `When TS/JS search needs surrounding implementation source, call nav_search_context with 1–12 literal terms, Unicode/emoji symbols, or "A|B|C" alternations (case-insensitive by default; pass terms: ["A", "B", "C"] instead of grep "A|B|C" followed by read${hasBash ? ' or shell grep/sed/cat' : ''}). Pass path to scope to a directory or single file. Reuse returned numbered fragments and 1-based UTF-16 anchors; call read only for unshown line ranges or single-line raw data tables.`,
+          `For TS/JS code search, call nav_search_context instead of grep${hasBash ? ' or shell grep/sed/cat' : ''}: use view="locations" for compact file/line/declaration discovery, or default view="fragments" for enclosing declarations and verbatim code (case-insensitive by default; supports terms, pattern regex, path, and include glob). On a single file, it returns complete enclosing declarations when within budget; do not re-read displayed line ranges—read only unshown offset/limit ranges.`,
         ]
         if (hybrid) {
           parts.push('When a prepared semanticIndex is configured, also pass a natural-language query with mode=hybrid (or mode=auto) for concept recall; vector-seeded source is re-read from the current workspace and is not semantic proof. The first vector card is the primary evidence card; later cards are supporting pointers. Use the primary card first, and open a supporting card only for a specific missing fact.')
         }
         if (hasAst && hasLsp) parts.push('Use available declaration or LSP tools only for unresolved identity, type or relationship questions.')
-        else if (hasAst) parts.push('Use nav_find_declarations only when exact declaration identity, kind, count or coordinates are still needed.')
+        else if (hasAst) parts.push('Use nav_find_declarations only when exhaustive per-name AST counts or coordinates are still needed.')
         else if (hasLsp) parts.push('Use available LSP tools only for unresolved symbol target, reference or type questions.')
         parts.push(`An unchanged${hybrid ? ' or empty' : ''} query adds no evidence; refine it or stop when the required facts are covered.`)
         return parts.join(' ')
@@ -158,16 +240,20 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
     name: 'nav_search_context',
     description: baseDescription,
     parameters: {
-      terms: { type: 'array', ...(hybrid ? {} : { required: true as const }), items: { type: 'string' }, description: '1–12 literal code terms, Unicode/emoji literals, or plain "A|B|C" alternations (2–64 chars for ASCII, or any non-ASCII symbol/emoji; case-insensitive by default, not regexes). Pass multiple terms as array items or "|"-separated literals, e.g. ["deleteLeft", "DeleteOperations", "getDeleteRange"].' + (hybrid ? ' Optional when query is present.' : '') },
-      caseSensitive: { type: 'boolean', description: 'Match terms case-sensitively when true. Defaults to false (case-insensitive matching).' },
+      terms: { type: 'array', items: { type: 'string' }, description: '1–12 search terms (literals, "A|B|C" alternations, escaped literals like "hsl\\(", "A.*B" same-line co-occurrence, or regexes; case-insensitive by default). Optional if pattern or query is given.' },
+      pattern: { type: 'string', description: 'Optional ripgrep regular expression (e.g. "disabled=\\{[^}]*0" or "dynamic.*(attribute|type)"). Use alongside or instead of terms.' },
+      include: { type: 'string', description: 'Optional glob filter (e.g. "*.ts", "*.{ts,tsx}", "*.test.js"). Positive single glob only.' },
+      view: { type: 'string', enum: ['fragments', 'locations'] as const, description: 'fragments (default) returns enclosing declarations/code bodies; locations returns compact file-grouped lines and declaration names.' },
+      caseSensitive: { type: 'boolean', description: 'Match case-sensitively when true. Defaults to false.' },
       ...(hybrid ? {
         query: { type: 'string', description: 'Optional natural-language concept/behavior, 1–1000 characters. Requires semanticIndex; use mode hybrid to force vector candidates, auto to use them only when lexical coverage is weak.' },
         mode: { type: 'string', enum: ['auto', 'lexical', 'hybrid'] as const, description: 'auto (default), lexical, or hybrid; hybrid requires query and semanticIndex.' },
       } : {}),
-      path: { type: 'string', description: 'Optional workspace-relative path or absolute path within the Session workspace; omit to search the workspace. Outside paths are rejected.' },
-      limit: { type: 'integer', description: 'Maximum fragments, 1–6; default 4. Each is at most 40 lines and 2 KiB; total source at most 8 KiB. Oversized declarations use a partial view rather than losing their identity.' },
+      path: { type: 'string', description: 'Optional workspace-relative or workspace-contained file/directory path; omit to search the workspace.' },
+      limit: { type: 'integer', description: 'Max fragments (1–6, default 4) in fragments view, or max files (1–20, default 12) in locations view; values above the cap are clamped cleanly.' },
     },
     output: { schema: { type: 'object', additionalProperties: false, properties: {
+      view: { type: 'string', required: true, enum: ['fragments', 'locations'] as const },
       matchesFound: { type: 'integer', required: true }, candidateFiles: { type: 'integer', required: true },
       filesRead: { type: 'integer', required: true }, bytesRead: { type: 'integer', required: true },
       truncated: { type: 'boolean', required: true }, usedVector: { type: 'boolean', required: true },
@@ -177,6 +263,16 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
       vectorStatus: { type: 'string', required: true, enum: ['off', 'ok', 'empty', 'reused', 'unavailable', 'stale', 'invalid', 'error'] as const },
       vectorTrigger: { type: 'string', required: true, enum: ['none', 'hybrid', 'query-only', 'lexical-empty', 'lexical-weak'] as const },
       limits: { type: 'array', required: true, items: { type: 'string' } },
+      interpretations: { type: 'array', required: true, items: { type: 'string' } },
+      declarationCoords: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        name: { type: 'string', required: true }, path: { type: 'string', required: true },
+        line: { type: 'integer', required: true }, character: { type: 'integer', required: true },
+        kind: { type: 'string', required: true }, container: { type: 'string', required: true },
+      } } },
+      omittedRanges: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        path: { type: 'string', required: true }, name: { type: 'string', required: true },
+        startLine: { type: 'integer', required: true }, endLine: { type: 'integer', required: true },
+      } } },
       skipped: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
         path: { type: 'string', required: true }, reason: { type: 'string', required: true },
       } } },
@@ -191,6 +287,7 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
         text: { type: 'string', required: true }, source: { type: 'string', required: true, enum: ['lexical-window', 'declaration-context', 'declaration-partial'] as const },
         contextStartLine: { type: 'integer', required: true }, contextEndLine: { type: 'integer', required: true },
         matchedTerms: { type: 'array', required: true, items: { type: 'string' } },
+        isLongLineExcerpt: { type: 'boolean' },
         seededByVector: { type: 'boolean' },
         seedStartLine: { type: 'integer' }, seedEndLine: { type: 'integer' },
         seedCoverage: { type: 'string', enum: ['full', 'partial'] as const },
@@ -200,8 +297,22 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
           character: { type: 'integer', required: true },
         } } },
       } } },
+      locations: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        path: { type: 'string', required: true }, totalMatches: { type: 'integer', required: true },
+        hits: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          line: { type: 'integer', required: true }, character: { type: 'integer', required: true },
+          preview: { type: 'string', required: true },
+          matchedTerms: { type: 'array', required: true, items: { type: 'string' } },
+          declarationName: { type: 'string' }, declarationKind: { type: 'string' },
+          declarationLine: { type: 'integer' }, declarationCharacter: { type: 'integer' },
+        } } },
+      } } },
+      extraMatchedFiles: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        path: { type: 'string', required: true }, matches: { type: 'integer', required: true },
+        lines: { type: 'array', required: true, items: { type: 'integer' } },
+      } } },
     } }, render: (args, value) => [{ type: 'text', text: renderCodeContext(value, args.caseSensitive ?? false) }] },
-    timeoutMs: 15000,
+    timeoutMs: 30000,
     isConcurrencySafe: () => true,
     execute: (args, exec) => {
       const session = exec.agent?.session as object | undefined
@@ -220,7 +331,7 @@ export function registerSearchContextTool(ctx: Context, input?: SemanticIndexCon
       const has = (name: string) => ctx.tools.get(name) !== undefined
       const parts = [baseDescription]
       if (has('nav_find_declarations')) {
-        parts.push('If declaration identity, count or coordinates are needed, pass confirmed fragment paths as files to nav_find_declarations.')
+        parts.push('If exhaustive per-name AST counts or coordinates are needed, pass confirmed fragment paths as files to nav_find_declarations.')
       }
       if (has('lsp')) {
         parts.push('For unresolved cross-file targets, references or types, use native lsp at exact surviving symbol coordinates.')
